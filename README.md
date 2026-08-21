@@ -2,17 +2,21 @@
 
 External XMPP component transport for personal Telegram accounts.
 
-The project follows the MAX transport shape: a Python XEP-0114 transport backend
-plus a small Xabber Server module. The backend owns Telegram MTProto access,
-session state, stanza translation, metadata sync, media references,
-deduplication, and loop suppression. The module is only a privileged roster push
-helper for virtual Telegram contacts.
+The project follows the MAX transport shape: a Python XEP-0114 transport
+backend. The backend owns Telegram MTProto access, session state, stanza
+translation, metadata sync, media references, deduplication, and loop
+suppression.
+
+The companion Xabber Server module lives in a separate project:
+
+```text
+/home/ilya.basyrov/Projects/module-transport-telegram
+```
 
 ## Layout
 
 ```text
-transport/  Python XEP-0114 component backend
-module/     Xabber Server module package for roster push
+xmpp_transport_telegram/  Python XEP-0114 component backend
 ```
 
 ## Dependency Choice
@@ -66,7 +70,7 @@ bot@telegram.example.com
 ## Install Backend
 
 ```bash
-cd xmpp-transport-telegram/transport
+cd xmpp-transport-telegram
 virtualenv venv -p python3
 venv/bin/pip install -r requirements.txt
 cp config.ini.example config.ini

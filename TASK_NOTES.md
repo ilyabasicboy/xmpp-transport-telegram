@@ -3,8 +3,8 @@
 ## Project Map
 
 - Telegram transport monorepo: `/home/ilya.basyrov/Projects/xmpp-transport-telegram`
-- Telegram transport backend: `/home/ilya.basyrov/Projects/xmpp-transport-telegram/transport`
-- Telegram server module: `/home/ilya.basyrov/Projects/xmpp-transport-telegram/module`
+- Telegram transport backend: `/home/ilya.basyrov/Projects/xmpp-transport-telegram/xmpp_transport_telegram`
+- Telegram server module: `/home/ilya.basyrov/Projects/module-transport-telegram`
 - MAX transport reference: `/home/ilya.basyrov/Projects/xmpp-transport-max`
 - MAX module reference: `/home/ilya.basyrov/Projects/module-transport-max`
 - Main panel project: `/home/ilya.basyrov/Projects/xabber-server-panel`
@@ -20,7 +20,9 @@
   open them only when a task needs that context.
 - Keep the Python transport compatible with Python 3.9. Do not use Python
   3.10-only typing syntax such as `A | B`; use `Optional[...]` or `Union[...]`.
-- Normal source changes for Telegram belong in this monorepo only.
+- Normal source changes for the Telegram transport backend belong in this repo.
+- Normal source changes for the Telegram server module belong in
+  `/home/ilya.basyrov/Projects/module-transport-telegram`.
 - Do not modify `xabber-server-panel`, `xabber-web-ng`, legacy `xabber_web`,
   `xabber-xmpp-server`, or the compiled `xmpp` tree as source work.
 - The only exception is temporary diagnostic instrumentation or deploying a
@@ -33,10 +35,11 @@
 
 ## Architecture
 
-- `transport/` is the external XMPP component and owns Telegram MTProto access,
+- `xmpp_transport_telegram/` is the external XMPP component and owns Telegram MTProto access,
   session state, XMPP stanza/IQ translation, metadata sync, media references,
   deduplication, and loop suppression.
-- `module/` is a privileged roster push helper for virtual Telegram contacts.
+- `module-transport-telegram` is a privileged roster push helper for virtual
+  Telegram contacts.
 - Runtime state lives in PostgreSQL: XMPP accounts, encrypted Telegram sessions,
   auth attempts, roster/group sync signatures, and transport-owned mappings
   where needed.
@@ -90,19 +93,19 @@ References checked:
 ## Useful Verification Commands
 
 ```bash
-cd /home/ilya.basyrov/Projects/xmpp-transport-telegram/transport
+cd /home/ilya.basyrov/Projects/xmpp-transport-telegram
 venv/bin/python -m compileall -q xmpp_transport_telegram
 ```
 
 ```bash
-cd /home/ilya.basyrov/Projects/xmpp-transport-telegram/transport
+cd /home/ilya.basyrov/Projects/xmpp-transport-telegram
 docker compose build transport
 docker compose up -d --force-recreate transport
 curl -sS http://127.0.0.1:8089/health
 ```
 
 ```bash
-cd /home/ilya.basyrov/Projects/xmpp-transport-telegram/module
+cd /home/ilya.basyrov/Projects/module-transport-telegram
 make
 /home/ilya.basyrov/Projects/xabber-server-panel/xmpp/bin/ejabberdctl restart_module example.com mod_transport_telegram
 ```
