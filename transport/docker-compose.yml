@@ -1,0 +1,33 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    env_file:
+      - data/postgres.env
+    volumes:
+      - transport_postgres:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:55433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  transport:
+    build: .
+    network_mode: host
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["python", "-m", "xmpp_transport_telegram", "--config", "/app/config.ini"]
+    volumes:
+      - ./data/config.ini:/app/config.ini:ro
+      - transport_telegram_sessions:/app/data/telegram_sessions
+      - transport_logs:/app/logs
+
+volumes:
+  transport_postgres:
+  transport_telegram_sessions:
+  transport_logs:

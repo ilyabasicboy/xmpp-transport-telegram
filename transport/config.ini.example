@@ -1,0 +1,36 @@
+[database]
+url = postgresql://transport_user:transport_password@127.0.0.1:5432/xmpp_transport_telegram
+
+[security]
+# Generate with:
+#   venv/bin/python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+session_encryption_key =
+
+[xmpp]
+component_jid = telegram.example.com
+component_password = put-xmpp-component-secret-here
+server_ip = 127.0.0.1
+server_port = 5238
+component_connect_timeout = 20
+component_retry_interval = 10
+
+[telegram]
+# Create these at https://my.telegram.org/apps
+api_id =
+api_hash =
+session_storage_dir = data/telegram_sessions
+
+[transport]
+# Optional. Defaults to example.com for component_jid=telegram.example.com.
+server_domain = example.com
+pid_file = run/xmpp_transport_telegram.pid
+
+[server]
+health_host = 127.0.0.1
+health_port = 8089
+
+[logging]
+level = INFO
+file = logs/xmpp_transport_telegram.log
+max_bytes = 10485760
+backup_count = 5

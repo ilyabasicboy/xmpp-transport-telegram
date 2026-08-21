@@ -1,0 +1,5 @@
+aiohttp>=3.9,<4
+slixmpp>=1.8,<1.12
+telethon>=1.36,<2
+asyncpg>=0.29,<1
+cryptography>=42,<46
