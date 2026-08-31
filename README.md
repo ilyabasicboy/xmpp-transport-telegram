@@ -134,6 +134,11 @@ returned Telegram contact through the roster helper module.
 On transport restart, connected Telegram sessions are reopened and their
 address books are synchronized again through the same idempotent roster path.
 
+If the same Telegram account is authorized from another Xabber account, the
+new authorization replaces the old XMPP binding. The old binding is logged out
+in transport storage, matching the personal-account behavior of the MAX
+transport.
+
 ## Boundaries
 
 - The Python transport must not write directly to Xabber Server database tables.

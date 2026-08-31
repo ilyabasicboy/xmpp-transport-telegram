@@ -103,33 +103,81 @@ class Repository:
         phone,
         encrypted_session: str,
         connected: bool,
-    ) -> None:
+    ):
         if self.pool is None:
             raise RuntimeError("Repository is not connected")
         async with self.pool.acquire() as connection:
-            await connection.execute(
-                """
-                INSERT INTO telegram_sessions (
+            async with connection.transaction():
+                await connection.execute(
+                    "SELECT pg_advisory_xact_lock($1)",
+                    telegram_user_id,
+                )
+                current_owner = await connection.fetchval(
+                    """
+                    SELECT xmpp_jid
+                    FROM xmpp_accounts
+                    WHERE id = $1
+                    """,
+                    xmpp_account_id,
+                )
+                previous_owner = await connection.fetchval(
+                    """
+                    SELECT accounts.xmpp_jid
+                    FROM telegram_sessions AS sessions
+                    JOIN xmpp_accounts AS accounts
+                        ON accounts.id = sessions.xmpp_account_id
+                    WHERE sessions.telegram_user_id = $1
+                        AND sessions.xmpp_account_id != $2
+                    """,
+                    telegram_user_id,
+                    xmpp_account_id,
+                )
+                if previous_owner is not None:
+                    await connection.execute(
+                        """
+                        DELETE FROM telegram_sessions
+                        WHERE telegram_user_id = $1
+                        """,
+                        telegram_user_id,
+                    )
+                    await connection.execute(
+                        """
+                        DELETE FROM synced_roster_items
+                        WHERE xmpp_jid = $1
+                        """,
+                        previous_owner,
+                    )
+
+                # A personal Telegram account can belong to only one XMPP user
+                # at a time.  The transaction first removes any previous owner,
+                # then upserts the current owner so the unique Telegram id never
+                # leaks as an async task exception.
+                await connection.execute(
+                    """
+                    INSERT INTO telegram_sessions (
+                        xmpp_account_id,
+                        telegram_user_id,
+                        phone,
+                        encrypted_session,
+                        connected
+                    )
+                    VALUES ($1, $2, $3, $4, $5)
+                    ON CONFLICT (xmpp_account_id) DO UPDATE SET
+                        telegram_user_id = EXCLUDED.telegram_user_id,
+                        phone = EXCLUDED.phone,
+                        encrypted_session = EXCLUDED.encrypted_session,
+                        connected = EXCLUDED.connected,
+                        updated_at = now()
+                    """,
                     xmpp_account_id,
                     telegram_user_id,
                     phone,
                     encrypted_session,
-                    connected
+                    connected,
                 )
-                VALUES ($1, $2, $3, $4, $5)
-                ON CONFLICT (xmpp_account_id) DO UPDATE SET
-                    telegram_user_id = EXCLUDED.telegram_user_id,
-                    phone = EXCLUDED.phone,
-                    encrypted_session = EXCLUDED.encrypted_session,
-                    connected = EXCLUDED.connected,
-                    updated_at = now()
-                """,
-                xmpp_account_id,
-                telegram_user_id,
-                phone,
-                encrypted_session,
-                connected,
-            )
+                if previous_owner == current_owner:
+                    return None
+                return previous_owner
 
     async def delete_telegram_session(self, xmpp_account_id: int) -> None:
         if self.pool is None:

@@ -35,6 +35,7 @@ class FakeRepository:
     def __init__(self):
         self.sessions = {}
         self.signatures = {}
+        self.previous_owner = None
 
     async def ensure_xmpp_account(self, xmpp_jid):
         return 1
@@ -56,6 +57,7 @@ class FakeRepository:
             "encrypted_session": encrypted_session,
             "connected": connected,
         }
+        return self.previous_owner
 
     async def delete_telegram_session(self, xmpp_account_id):
         self.sessions.pop(xmpp_account_id, None)
@@ -264,4 +266,31 @@ async def _test_add_and_sync_contacts_call_roster_callback():
         ("user@example.com", 200),
         ("user@example.com", 100),
         ("user@example.com", 200),
+    ]
+
+
+def test_login_reports_replaced_previous_xmpp_binding():
+    asyncio.run(_test_login_reports_replaced_previous_xmpp_binding())
+
+
+async def _test_login_reports_replaced_previous_xmpp_binding():
+    repository = FakeRepository()
+    repository.previous_owner = "old@example.com"
+    telegram = FakeTelegramBackend()
+    cipher = SessionCipher(Fernet.generate_key().decode("ascii"))
+    service = CommandService(repository, telegram, cipher, FakeQrStore(), fake_ensure_contact)
+    notifications = []
+
+    async def notify(body):
+        notifications.append(body)
+
+    await service.handle("new@example.com", "/login", notify)
+    telegram.client.qr_login_value.complete()
+    await asyncio.wait_for(telegram.client.qr_login_value._event.wait(), timeout=1)
+    await asyncio.sleep(0)
+
+    assert notifications == [
+        "Telegram account connected as @telegram_user. "
+        "Telegram returned no address-book contacts to sync. "
+        "Previous XMPP binding old@example.com was replaced."
     ]

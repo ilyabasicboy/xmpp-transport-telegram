@@ -135,12 +135,11 @@ class CommandService:
 
         if await client.is_user_authorized():
             user = await client.get_me()
-            await self._save_connected_session(account_id, client, user)
+            previous_owner = await self._save_connected_session(account_id, client, user)
             sync_message = await self._sync_contacts_after_login(xmpp_jid, client)
             await client.disconnect()
             return self._response(
-                "Telegram account is already connected as %s. %s"
-                % (self._format_user(user), sync_message)
+                self._connected_message(user, sync_message, previous_owner)
             )
 
         qr_login = await client.qr_login()
@@ -182,12 +181,22 @@ class CommandService:
                 "Telegram QR authorization failed. Send /login to try again.",
             )
         else:
-            await self._save_connected_session(attempt.account_id, attempt.client, user)
-            sync_message = await self._sync_contacts_after_login(xmpp_jid, attempt.client)
-            await attempt.notify(
-                "Telegram account connected as %s. %s" % (self._format_user(user), sync_message)
-            )
-            await self._discard_attempt(xmpp_jid)
+            try:
+                previous_owner = await self._save_connected_session(
+                    attempt.account_id,
+                    attempt.client,
+                    user,
+                )
+                sync_message = await self._sync_contacts_after_login(xmpp_jid, attempt.client)
+            except Exception:
+                log.exception("Telegram login finalization failed for %s", xmpp_jid)
+                await self._finish_failed_attempt(
+                    xmpp_jid,
+                    "Telegram login was accepted, but session finalization failed. Send /login to try again.",
+                )
+            else:
+                await attempt.notify(self._connected_message(user, sync_message, previous_owner))
+                await self._discard_attempt(xmpp_jid)
 
     async def _complete_password(self, xmpp_jid: str, password: str) -> str:
         if not password:
@@ -203,10 +212,10 @@ class CommandService:
             log.exception("Telegram cloud password failed for %s", xmpp_jid)
             return "Telegram cloud password was rejected. Send /password <password> to try again."
 
-        await self._save_connected_session(attempt.account_id, attempt.client, user)
+        previous_owner = await self._save_connected_session(attempt.account_id, attempt.client, user)
         sync_message = await self._sync_contacts_after_login(xmpp_jid, attempt.client)
         await self._discard_attempt(xmpp_jid)
-        return "Telegram account connected as %s. %s" % (self._format_user(user), sync_message)
+        return self._connected_message(user, sync_message, previous_owner)
 
     async def _status(self, xmpp_jid: str) -> str:
         attempt = self._qr_attempts.get(xmpp_jid)
@@ -330,10 +339,10 @@ class CommandService:
             return None
         return self.session_cipher.decrypt(row["encrypted_session"])
 
-    async def _save_connected_session(self, account_id: int, client, user) -> None:
+    async def _save_connected_session(self, account_id: int, client, user):
         session_data = client.session.save()
         encrypted_session = self.session_cipher.encrypt(session_data)
-        await self.repository.upsert_telegram_session(
+        return await self.repository.upsert_telegram_session(
             account_id,
             int(user.id),
             getattr(user, "phone", None),
@@ -383,6 +392,14 @@ class CommandService:
         last_name = getattr(user, "last_name", None)
         full_name = " ".join(part for part in (first_name, last_name) if part)
         return full_name or str(getattr(user, "id", "unknown user"))
+
+    def _connected_message(self, user, sync_message: str, previous_owner: Optional[str]) -> str:
+        suffix = " Previous XMPP binding %s was replaced." % previous_owner if previous_owner else ""
+        return "Telegram account connected as %s. %s%s" % (
+            self._format_user(user),
+            sync_message,
+            suffix,
+        )
 
     @staticmethod
     def contact_jid(component_domain: str, contact: TelegramContact) -> str:
