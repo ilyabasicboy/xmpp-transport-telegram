@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from typing import Awaitable, Callable
+from xml.etree import ElementTree as ET
 
 from slixmpp import ComponentXMPP
 from slixmpp.jid import JID
@@ -8,6 +9,7 @@ from slixmpp.jid import JID
 from xmpp_transport_telegram.core.commands import ControlResponse
 from xmpp_transport_telegram.runtime.config import Settings
 from xmpp_transport_telegram.xmpp.message_xml import XmppMessageXml
+from xmpp_transport_telegram.xmpp.namespaces import TRANSPORT_TELEGRAM_NS
 
 
 log = logging.getLogger(__name__)
@@ -30,11 +32,22 @@ class TelegramCommandComponent(ComponentXMPP):
         self.settings = settings
         self.command_handler = command_handler
         self.bot_jid = "bot@%s" % settings.xmpp_component_jid
+        self.transport_server_domain = settings.transport_server_domain
+        self.component_domain = settings.xmpp_component_jid
+        self._session_ready = asyncio.Event()
         self.add_event_handler("session_start", self._handle_session_start)
+        self.add_event_handler("disconnected", self._handle_disconnected)
         self.add_event_handler("message", self._handle_message)
 
     async def _handle_session_start(self, _event) -> None:
         log.info("XMPP component session started for %s", self.boundjid.bare)
+        self._session_ready.set()
+
+    def _handle_disconnected(self, _event) -> None:
+        self._session_ready.clear()
+
+    async def wait_until_ready(self, timeout: int) -> None:
+        await asyncio.wait_for(self._session_ready.wait(), timeout=timeout)
 
     def _handle_message(self, message) -> None:
         asyncio.create_task(self._handle_message_async(message))
@@ -58,7 +71,15 @@ class TelegramCommandComponent(ComponentXMPP):
         async def notify(reply_body: str) -> None:
             self._send_reply(message["from"], reply_body)
 
-        response = await self.command_handler(from_jid, body, notify)
+        try:
+            response = await self.command_handler(from_jid, body, notify)
+        except (RuntimeError, ValueError) as exc:
+            self._send_reply(message["from"], str(exc))
+            return
+        except Exception:
+            log.exception("Telegram command failed for %s", from_jid)
+            self._send_reply(message["from"], "Telegram command failed. Try again later.")
+            return
         self._send_reply(message["from"], response.body, media=response.media)
 
     def _send_reply(self, to_jid: str, body: str, media: tuple = ()) -> None:
@@ -73,6 +94,40 @@ class TelegramCommandComponent(ComponentXMPP):
             message.xml.append(reference)
         message.send()
 
+    async def send_transport_operation(
+        self,
+        operation: str,
+        fields: dict,
+        groups: tuple = (),
+        timeout: int = 10,
+    ) -> str:
+        query = self._transport_query_element(operation, fields, groups)
+        iq = self.make_iq_set(
+            sub=query,
+            ito=self.transport_server_domain,
+            ifrom=self.component_domain,
+        )
+        # Server-owned roster changes go through the privileged module. The
+        # Python transport records only what it asked to sync, never roster rows.
+        result = await iq.send(timeout=timeout)
+        query_result = result.xml.find("{%s}query" % TRANSPORT_TELEGRAM_NS)
+        if query_result is None:
+            return "ok"
+        return query_result.attrib.get("status", "ok")
+
+    def _transport_query_element(self, operation: str, fields: dict, groups: tuple) -> ET.Element:
+        query = ET.Element(
+            "{%s}query" % TRANSPORT_TELEGRAM_NS,
+            {"op": operation},
+        )
+        for name, value in fields.items():
+            field = ET.SubElement(query, "field", {"name": str(name)})
+            field.text = str(value)
+        for group in groups:
+            group_el = ET.SubElement(query, "group")
+            group_el.text = str(group)
+        return query
+
 
 class XmppComponent:
     def __init__(self, settings: Settings, command_handler: CommandHandler) -> None:
@@ -85,6 +140,7 @@ class XmppComponent:
             self.settings.xmpp_component_host,
             self.settings.xmpp_component_port,
         )
+        await self.client.wait_until_ready(self.settings.xmpp_component_connect_timeout)
         log.info("XMPP component connected as %s", self.settings.xmpp_component_jid)
 
     async def stop(self) -> None:

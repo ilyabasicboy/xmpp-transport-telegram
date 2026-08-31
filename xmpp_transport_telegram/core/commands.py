@@ -1,27 +1,32 @@
 import asyncio
+import hashlib
 import logging
 from dataclasses import dataclass
 from datetime import timezone
-from typing import Awaitable, Callable, Dict, Optional
+from typing import Awaitable, Callable, Dict, List, Optional
 
 from telethon.errors import SessionPasswordNeededError
 
 from xmpp_transport_telegram.core.qr_store import QrCodeStore, StoredQrImage
 from xmpp_transport_telegram.core.session_manager import SessionCipher
 from xmpp_transport_telegram.core.state import AuthStatus
+from xmpp_transport_telegram.telegram.models import TelegramContact
+from xmpp_transport_telegram.xmpp.models import TelegramContactJid
 
 
 HELP_TEXT = """Telegram transport commands:
 /login - start Telegram QR authorization
 /password <password> - complete Telegram cloud password after QR scan
 /status
-/contacts
+/contacts [page]
 /add <number>
+/sync-contacts
 /logout
 /help"""
 
 
 NotifyCallback = Callable[[str], Awaitable[None]]
+EnsureContactCallback = Callable[[str, TelegramContact], Awaitable[None]]
 
 
 @dataclass
@@ -59,26 +64,32 @@ def command_response(body: str) -> str:
     if command == "/status":
         return "Telegram account is not connected."
     if command == "/contacts":
-        return "Telegram contact sync is not implemented yet."
+        return "Telegram contact listing requires the running transport service."
     if command == "/add":
-        return "Telegram contact add is not implemented yet."
+        return "Telegram contact add requires the running transport service."
+    if command == "/sync-contacts":
+        return "Telegram contact sync requires the running transport service."
     if command == "/logout":
         return "Telegram logout requires the running transport service."
     return "Unknown command.\n\n%s" % HELP_TEXT
 
 
 class CommandService:
+    CONTACTS_PAGE_SIZE = 50
+
     def __init__(
         self,
         repository,
         telegram,
         session_cipher: SessionCipher,
         qr_store: QrCodeStore,
+        ensure_contact: EnsureContactCallback,
     ) -> None:
         self.repository = repository
         self.telegram = telegram
         self.session_cipher = session_cipher
         self.qr_store = qr_store
+        self.ensure_contact = ensure_contact
         self._qr_attempts: Dict[str, QrLoginAttempt] = {}
 
     async def handle(self, xmpp_jid: str, body: str, notify: NotifyCallback) -> ControlResponse:
@@ -103,9 +114,11 @@ class CommandService:
         if command == "/status":
             return self._response(await self._status(xmpp_jid))
         if command == "/contacts":
-            return self._response("Telegram contact sync is not implemented yet.")
+            return self._response(await self._contacts_response(xmpp_jid, argument))
         if command == "/add":
-            return self._response("Telegram contact add is not implemented yet.")
+            return self._response(await self._add_contact_response(xmpp_jid, argument))
+        if command == "/sync-contacts":
+            return self._response(await self._sync_contacts_response(xmpp_jid))
         if command == "/logout":
             return self._response(await self._logout(xmpp_jid))
         return self._response("Unknown command.\n\n%s" % HELP_TEXT)
@@ -123,9 +136,11 @@ class CommandService:
         if await client.is_user_authorized():
             user = await client.get_me()
             await self._save_connected_session(account_id, client, user)
+            sync_message = await self._sync_contacts_after_login(xmpp_jid, client)
             await client.disconnect()
             return self._response(
-                "Telegram account is already connected as %s." % self._format_user(user)
+                "Telegram account is already connected as %s. %s"
+                % (self._format_user(user), sync_message)
             )
 
         qr_login = await client.qr_login()
@@ -168,7 +183,10 @@ class CommandService:
             )
         else:
             await self._save_connected_session(attempt.account_id, attempt.client, user)
-            await attempt.notify("Telegram account connected as %s." % self._format_user(user))
+            sync_message = await self._sync_contacts_after_login(xmpp_jid, attempt.client)
+            await attempt.notify(
+                "Telegram account connected as %s. %s" % (self._format_user(user), sync_message)
+            )
             await self._discard_attempt(xmpp_jid)
 
     async def _complete_password(self, xmpp_jid: str, password: str) -> str:
@@ -186,8 +204,9 @@ class CommandService:
             return "Telegram cloud password was rejected. Send /password <password> to try again."
 
         await self._save_connected_session(attempt.account_id, attempt.client, user)
+        sync_message = await self._sync_contacts_after_login(xmpp_jid, attempt.client)
         await self._discard_attempt(xmpp_jid)
-        return "Telegram account connected as %s." % self._format_user(user)
+        return "Telegram account connected as %s. %s" % (self._format_user(user), sync_message)
 
     async def _status(self, xmpp_jid: str) -> str:
         attempt = self._qr_attempts.get(xmpp_jid)
@@ -217,6 +236,93 @@ class CommandService:
                 await client.disconnect()
         await self.repository.delete_telegram_session(account_id)
         return "Telegram account disconnected."
+
+    async def _contacts_response(self, xmpp_jid: str, argument: str) -> str:
+        page = self._parse_contacts_page(argument)
+        # Telegram returns the address book as a full result set.  We keep that
+        # complete ordering for stable /add numbers, then page only the XMPP text.
+        contacts = await self._list_contacts(xmpp_jid)
+        if not contacts:
+            return "Telegram returned no address-book contacts."
+
+        start = (page - 1) * self.CONTACTS_PAGE_SIZE
+        if start >= len(contacts):
+            return "There is no Telegram contacts page %s." % page
+
+        shown = contacts[start : start + self.CONTACTS_PAGE_SIZE]
+        total_pages = (len(contacts) + self.CONTACTS_PAGE_SIZE - 1) // self.CONTACTS_PAGE_SIZE
+        lines = ["Telegram contacts, page %s/%s:" % (page, total_pages)]
+        lines.extend(
+            "%s. %s%s"
+            % (
+                start + index,
+                contact.title,
+                self._contact_suffix(contact),
+            )
+            for index, contact in enumerate(shown, start=1)
+        )
+        lines.append("")
+        lines.append("Add to Xabber: /add <number>")
+        lines.append("Sync all listed Telegram contacts: /sync-contacts")
+        if page < total_pages:
+            lines.append("Next page: /contacts %s" % (page + 1))
+        return "\n".join(lines)
+
+    async def _add_contact_response(self, xmpp_jid: str, argument: str) -> str:
+        contact = await self._resolve_contact_selection(xmpp_jid, argument)
+        await self.ensure_contact(xmpp_jid, contact)
+        return "Telegram contact added to Xabber: %s" % contact.title
+
+    async def _sync_contacts_response(self, xmpp_jid: str) -> str:
+        contacts = await self._list_contacts(xmpp_jid)
+        if not contacts:
+            return "Telegram returned no address-book contacts."
+        # Each contact goes through the same idempotent roster path as /add, so
+        # bulk sync is safe to repeat after reconnects or metadata changes.
+        for contact in contacts:
+            await self.ensure_contact(xmpp_jid, contact)
+        return "Telegram contacts synchronized with Xabber: %s." % len(contacts)
+
+    async def _sync_contacts_after_login(self, xmpp_jid: str, client) -> str:
+        try:
+            contacts = await self.telegram.list_contacts(client)
+            for contact in contacts:
+                await self.ensure_contact(xmpp_jid, contact)
+        except Exception:
+            log.exception("Telegram contact sync after login failed for %s", xmpp_jid)
+            return "Contact sync failed; send /sync-contacts to retry."
+        if not contacts:
+            return "Telegram returned no address-book contacts to sync."
+        return "Synced %s Telegram contacts into the Telegram circle." % len(contacts)
+
+    async def _list_contacts(self, xmpp_jid: str) -> List[TelegramContact]:
+        client = await self._authorized_client(xmpp_jid)
+        try:
+            return await self.telegram.list_contacts(client)
+        finally:
+            await client.disconnect()
+
+    async def _authorized_client(self, xmpp_jid: str):
+        account_id = await self.repository.ensure_xmpp_account(xmpp_jid)
+        session_data = await self._load_session(account_id)
+        if not session_data:
+            raise RuntimeError("Telegram is not connected. Send /login first.")
+        client = self.telegram.client_for_session(session_data)
+        await client.connect()
+        if not await client.is_user_authorized():
+            await client.disconnect()
+            raise RuntimeError("Telegram session expired. Send /login again.")
+        return client
+
+    async def _resolve_contact_selection(self, xmpp_jid: str, argument: str) -> TelegramContact:
+        try:
+            selection = int(argument.strip())
+        except ValueError:
+            raise ValueError("Usage: /add <number> from /contacts")
+        contacts = await self._list_contacts(xmpp_jid)
+        if selection < 1 or selection > len(contacts):
+            raise ValueError("Telegram contact number is out of range.")
+        return contacts[selection - 1]
 
     async def _load_session(self, account_id: int) -> Optional[str]:
         row = await self.repository.get_telegram_session(account_id)
@@ -277,3 +383,41 @@ class CommandService:
         last_name = getattr(user, "last_name", None)
         full_name = " ".join(part for part in (first_name, last_name) if part)
         return full_name or str(getattr(user, "id", "unknown user"))
+
+    @staticmethod
+    def contact_jid(component_domain: str, contact: TelegramContact) -> str:
+        return TelegramContactJid(contact.peer_id, component_domain).jid
+
+    @staticmethod
+    def contact_sync_signature(contact: TelegramContact) -> str:
+        value = "\n".join(
+            [
+                contact.title,
+                contact.username or "",
+                contact.phone or "",
+            ]
+        )
+        # The signature is just a cheap idempotency key for roster sync, not a
+        # trust or tamper-proofing mechanism.
+        return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _parse_contacts_page(argument: str) -> int:
+        if not argument:
+            return 1
+        try:
+            page = int(argument)
+        except ValueError:
+            raise ValueError("Usage: /contacts [page]")
+        if page < 1:
+            raise ValueError("Usage: /contacts [page]")
+        return page
+
+    @staticmethod
+    def _contact_suffix(contact: TelegramContact) -> str:
+        details = []
+        if contact.username:
+            details.append("@%s" % contact.username)
+        if contact.phone:
+            details.append("+%s" % contact.phone)
+        return " (%s)" % ", ".join(details) if details else ""

@@ -32,6 +32,9 @@
 - Prefer narrow diagnostics and filtered logs. Do not dump large logs, full
   stanzas, media URLs, generated bundles, Telegram auth codes, session strings,
   or message bodies into chat context.
+- Write human-readable code. Add comments for difficult methods and protocol
+  edges where the intent, safety boundary, or idempotency rule would otherwise
+  be hard to recover from the code alone.
 
 ## Architecture
 

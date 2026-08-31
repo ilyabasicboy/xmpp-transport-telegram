@@ -50,6 +50,20 @@ class Repository:
 
                 CREATE UNIQUE INDEX IF NOT EXISTS telegram_sessions_xmpp_account_id_idx
                 ON telegram_sessions (xmpp_account_id);
+
+                CREATE TABLE IF NOT EXISTS synced_roster_items (
+                    id BIGSERIAL PRIMARY KEY,
+                    xmpp_jid TEXT NOT NULL,
+                    item_jid TEXT NOT NULL,
+                    item_kind TEXT NOT NULL,
+                    sync_signature TEXT NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    UNIQUE (xmpp_jid, item_jid)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_synced_roster_items_xmpp_jid
+                ON synced_roster_items (xmpp_jid);
                 """
             )
 
@@ -124,4 +138,74 @@ class Repository:
             await connection.execute(
                 "DELETE FROM telegram_sessions WHERE xmpp_account_id = $1",
                 xmpp_account_id,
+            )
+
+    async def list_connected_telegram_sessions(self):
+        if self.pool is None:
+            raise RuntimeError("Repository is not connected")
+        async with self.pool.acquire() as connection:
+            return await connection.fetch(
+                """
+                SELECT
+                    accounts.xmpp_jid,
+                    sessions.encrypted_session
+                FROM telegram_sessions AS sessions
+                JOIN xmpp_accounts AS accounts
+                    ON accounts.id = sessions.xmpp_account_id
+                WHERE sessions.connected = true
+                ORDER BY accounts.xmpp_jid
+                """
+            )
+
+    async def get_synced_roster_item_signature(self, xmpp_jid: str, item_jid: str):
+        if self.pool is None:
+            raise RuntimeError("Repository is not connected")
+        async with self.pool.acquire() as connection:
+            return await connection.fetchval(
+                """
+                SELECT sync_signature
+                FROM synced_roster_items
+                WHERE xmpp_jid = $1 AND item_jid = $2
+                """,
+                xmpp_jid,
+                item_jid,
+            )
+
+    async def set_synced_roster_item_signature(
+        self,
+        xmpp_jid: str,
+        item_jid: str,
+        item_kind: str,
+        sync_signature: str,
+    ) -> None:
+        if self.pool is None:
+            raise RuntimeError("Repository is not connected")
+        async with self.pool.acquire() as connection:
+            await connection.execute(
+                """
+                INSERT INTO synced_roster_items (
+                    xmpp_jid, item_jid, item_kind, sync_signature, updated_at
+                ) VALUES ($1, $2, $3, $4, now())
+                ON CONFLICT (xmpp_jid, item_jid) DO UPDATE SET
+                    item_kind = EXCLUDED.item_kind,
+                    sync_signature = EXCLUDED.sync_signature,
+                    updated_at = now()
+                """,
+                xmpp_jid,
+                item_jid,
+                item_kind,
+                sync_signature,
+            )
+
+    async def delete_synced_roster_item(self, xmpp_jid: str, item_jid: str) -> None:
+        if self.pool is None:
+            raise RuntimeError("Repository is not connected")
+        async with self.pool.acquire() as connection:
+            await connection.execute(
+                """
+                DELETE FROM synced_roster_items
+                WHERE xmpp_jid = $1 AND item_jid = $2
+                """,
+                xmpp_jid,
+                item_jid,
             )

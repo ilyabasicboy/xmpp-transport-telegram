@@ -5,6 +5,7 @@ from cryptography.fernet import Fernet
 
 from xmpp_transport_telegram.core.commands import CommandService, HELP_TEXT, command_response
 from xmpp_transport_telegram.core.session_manager import SessionCipher
+from xmpp_transport_telegram.telegram.models import TelegramContact
 
 
 def test_help_command_returns_command_list():
@@ -33,6 +34,7 @@ def test_unknown_command_includes_help():
 class FakeRepository:
     def __init__(self):
         self.sessions = {}
+        self.signatures = {}
 
     async def ensure_xmpp_account(self, xmpp_jid):
         return 1
@@ -57,6 +59,18 @@ class FakeRepository:
 
     async def delete_telegram_session(self, xmpp_account_id):
         self.sessions.pop(xmpp_account_id, None)
+
+    async def get_synced_roster_item_signature(self, xmpp_jid, item_jid):
+        return self.signatures.get((xmpp_jid, item_jid))
+
+    async def set_synced_roster_item_signature(
+        self,
+        xmpp_jid,
+        item_jid,
+        item_kind,
+        sync_signature,
+    ):
+        self.signatures[(xmpp_jid, item_jid)] = sync_signature
 
 
 class FakeSession:
@@ -86,9 +100,10 @@ class FakeUser:
 
 
 class FakeClient:
-    def __init__(self):
+    def __init__(self, authorized=False):
         self.session = FakeSession()
         self.qr_login_value = FakeQrLogin()
+        self.authorized = authorized
         self.disconnected = False
 
     async def connect(self):
@@ -98,18 +113,22 @@ class FakeClient:
         self.disconnected = True
 
     async def is_user_authorized(self):
-        return False
+        return self.authorized
 
     async def qr_login(self):
         return self.qr_login_value
 
 
 class FakeTelegramBackend:
-    def __init__(self):
-        self.client = FakeClient()
+    def __init__(self, authorized=False, contacts=()):
+        self.client = FakeClient(authorized=authorized)
+        self.contacts = list(contacts)
 
     def client_for_session(self, session_data=None):
         return self.client
+
+    async def list_contacts(self, client):
+        return self.contacts
 
 
 class FakeQrStore:
@@ -126,15 +145,28 @@ class FakeQrStore:
         )()
 
 
+async def fake_ensure_contact(_xmpp_jid, _contact):
+    pass
+
+
 def test_login_starts_qr_authorization():
     asyncio.run(_test_login_starts_qr_authorization())
 
 
 async def _test_login_starts_qr_authorization():
     repository = FakeRepository()
-    telegram = FakeTelegramBackend()
+    contacts = [
+        TelegramContact(peer_id=100, title="Alice", username="alice"),
+        TelegramContact(peer_id=200, title="Bob", phone="15551230000"),
+    ]
+    telegram = FakeTelegramBackend(contacts=contacts)
     cipher = SessionCipher(Fernet.generate_key().decode("ascii"))
-    service = CommandService(repository, telegram, cipher, FakeQrStore())
+    synced = []
+
+    async def ensure_contact(xmpp_jid, contact):
+        synced.append((xmpp_jid, contact.peer_id))
+
+    service = CommandService(repository, telegram, cipher, FakeQrStore(), ensure_contact)
     notifications = []
 
     async def notify(body):
@@ -154,5 +186,82 @@ async def _test_login_starts_qr_authorization():
     await asyncio.wait_for(telegram.client.qr_login_value._event.wait(), timeout=1)
     await asyncio.sleep(0)
 
-    assert notifications == ["Telegram account connected as @telegram_user."]
+    assert notifications == [
+        "Telegram account connected as @telegram_user. Synced 2 Telegram contacts into the Telegram circle."
+    ]
+    assert synced == [
+        ("user@example.com", 100),
+        ("user@example.com", 200),
+    ]
     assert repository.sessions[1]["connected"] is True
+
+
+def test_contacts_uses_full_contact_list_and_pages_output():
+    asyncio.run(_test_contacts_uses_full_contact_list_and_pages_output())
+
+
+async def _test_contacts_uses_full_contact_list_and_pages_output():
+    cipher = SessionCipher(Fernet.generate_key().decode("ascii"))
+    repository = FakeRepository()
+    repository.sessions[1] = {
+        "telegram_user_id": 42,
+        "phone": None,
+        "encrypted_session": cipher.encrypt("stored-session"),
+        "connected": True,
+    }
+    contacts = [
+        TelegramContact(peer_id=index, title="Contact %03d" % index)
+        for index in range(1, 56)
+    ]
+    telegram = FakeTelegramBackend(authorized=True, contacts=contacts)
+    service = CommandService(repository, telegram, cipher, FakeQrStore(), fake_ensure_contact)
+
+    async def notify(_body):
+        pass
+
+    response = await service.handle("user@example.com", "/contacts 2", notify)
+
+    assert "Telegram contacts, page 2/2:" in response.body
+    assert "51. Contact 051" in response.body
+    assert "55. Contact 055" in response.body
+    assert "Sync all listed Telegram contacts: /sync-contacts" in response.body
+
+
+def test_add_and_sync_contacts_call_roster_callback():
+    asyncio.run(_test_add_and_sync_contacts_call_roster_callback())
+
+
+async def _test_add_and_sync_contacts_call_roster_callback():
+    cipher = SessionCipher(Fernet.generate_key().decode("ascii"))
+    repository = FakeRepository()
+    repository.sessions[1] = {
+        "telegram_user_id": 42,
+        "phone": None,
+        "encrypted_session": cipher.encrypt("stored-session"),
+        "connected": True,
+    }
+    contacts = [
+        TelegramContact(peer_id=100, title="Alice", username="alice"),
+        TelegramContact(peer_id=200, title="Bob", phone="15551230000"),
+    ]
+    telegram = FakeTelegramBackend(authorized=True, contacts=contacts)
+    synced = []
+
+    async def ensure_contact(xmpp_jid, contact):
+        synced.append((xmpp_jid, contact.peer_id))
+
+    service = CommandService(repository, telegram, cipher, FakeQrStore(), ensure_contact)
+
+    async def notify(_body):
+        pass
+
+    add_response = await service.handle("user@example.com", "/add 2", notify)
+    sync_response = await service.handle("user@example.com", "/sync-contacts", notify)
+
+    assert add_response.body == "Telegram contact added to Xabber: Bob"
+    assert sync_response.body == "Telegram contacts synchronized with Xabber: 2."
+    assert synced == [
+        ("user@example.com", 200),
+        ("user@example.com", 100),
+        ("user@example.com", 200),
+    ]

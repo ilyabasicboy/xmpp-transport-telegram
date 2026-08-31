@@ -10,3 +10,11 @@ class TelegramDialog:
     phone: Optional[str] = None
     is_group: bool = False
     is_channel: bool = False
+
+
+@dataclass(frozen=True)
+class TelegramContact:
+    peer_id: int
+    title: str
+    username: Optional[str] = None
+    phone: Optional[str] = None

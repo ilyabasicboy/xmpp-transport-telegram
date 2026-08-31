@@ -112,6 +112,7 @@ Command contact commands:
 /status
 /contacts
 /add <number>
+/sync-contacts
 /logout
 /help
 ```
@@ -123,6 +124,15 @@ password after accepting the login, send `/password <password>`.
 
 Production work should replace `/password` chat commands with a short-lived
 HTTPS form so secrets do not remain in XMPP history.
+
+After successful login, the transport loads the full Telegram address book
+through MTProto and pushes it into the Xabber roster under the `Telegram`
+circle. `/contacts` displays that full Telegram contact list in pages, `/add
+<number>` retries one listed contact, and `/sync-contacts` retries every
+returned Telegram contact through the roster helper module.
+
+On transport restart, connected Telegram sessions are reopened and their
+address books are synchronized again through the same idempotent roster path.
 
 ## Boundaries
 
