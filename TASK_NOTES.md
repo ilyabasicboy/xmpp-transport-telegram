@@ -112,9 +112,8 @@ make
 
 ## Known Production Work
 
-- Replace XMPP-message Telegram code/password input with short-lived HTTPS
-  submission forms.
-- Implement persistent encrypted Telethon session storage.
+- Replace XMPP-message Telegram password input with a short-lived HTTPS
+  submission form.
 - Implement dialog snapshot sync and roster push signatures.
 - Define group/channel mapping after reading Xabber custom XEP drafts.
 - Extend media/file bridging after inbound/outbound text behavior is stable.

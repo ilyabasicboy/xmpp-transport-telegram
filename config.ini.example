@@ -28,6 +28,9 @@ pid_file = run/xmpp_transport_telegram.pid
 [server]
 health_host = 127.0.0.1
 health_port = 8089
+qr_storage_dir = data/login_qr
+# Public base URL for this transport HTTP listener. /qr/<file>.svg is appended.
+qr_base_url = http://127.0.0.1:8089
 
 [logging]
 level = INFO

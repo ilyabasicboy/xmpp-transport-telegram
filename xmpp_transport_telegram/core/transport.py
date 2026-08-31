@@ -1,6 +1,9 @@
 import asyncio
 import logging
 
+from xmpp_transport_telegram.core.commands import CommandService
+from xmpp_transport_telegram.core.qr_store import QrCodeStore
+from xmpp_transport_telegram.core.session_manager import SessionCipher
 from xmpp_transport_telegram.runtime.config import Settings
 from xmpp_transport_telegram.storage.repository import Repository
 from xmpp_transport_telegram.telegram.backend import TelegramBackend
@@ -15,7 +18,15 @@ class TelegramTransport:
         self.settings = settings
         self.repository = repository
         self.telegram = TelegramBackend(settings)
-        self.xmpp = XmppComponent(settings)
+        self.session_cipher = SessionCipher(settings.session_encryption_key)
+        self.qr_store = QrCodeStore(settings.qr_storage_dir, "%s/qr" % settings.qr_base_url)
+        self.commands = CommandService(
+            repository,
+            self.telegram,
+            self.session_cipher,
+            self.qr_store,
+        )
+        self.xmpp = XmppComponent(settings, self.commands.handle)
         self._stopped = asyncio.Event()
 
     async def run_forever(self) -> None:

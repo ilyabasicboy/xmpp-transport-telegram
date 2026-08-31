@@ -1,18 +1,26 @@
 import asyncio
 import logging
+from typing import Awaitable, Callable
 
 from slixmpp import ComponentXMPP
 from slixmpp.jid import JID
 
-from xmpp_transport_telegram.core.commands import command_response
+from xmpp_transport_telegram.core.commands import ControlResponse
 from xmpp_transport_telegram.runtime.config import Settings
+from xmpp_transport_telegram.xmpp.message_xml import XmppMessageXml
 
 
 log = logging.getLogger(__name__)
 
 
+CommandHandler = Callable[
+    [str, str, Callable[[str], Awaitable[None]]],
+    Awaitable[ControlResponse],
+]
+
+
 class TelegramCommandComponent(ComponentXMPP):
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, command_handler: CommandHandler) -> None:
         super().__init__(
             settings.xmpp_component_jid,
             settings.xmpp_component_secret,
@@ -20,6 +28,7 @@ class TelegramCommandComponent(ComponentXMPP):
             settings.xmpp_component_port,
         )
         self.settings = settings
+        self.command_handler = command_handler
         self.bot_jid = "bot@%s" % settings.xmpp_component_jid
         self.add_event_handler("session_start", self._handle_session_start)
         self.add_event_handler("message", self._handle_message)
@@ -28,6 +37,9 @@ class TelegramCommandComponent(ComponentXMPP):
         log.info("XMPP component session started for %s", self.boundjid.bare)
 
     def _handle_message(self, message) -> None:
+        asyncio.create_task(self._handle_message_async(message))
+
+    async def _handle_message_async(self, message) -> None:
         message_type = message["type"]
         if message_type not in ("chat", "normal", ""):
             return
@@ -41,19 +53,31 @@ class TelegramCommandComponent(ComponentXMPP):
             log.debug("Ignoring message addressed to %s", to_jid.bare)
             return
 
-        reply = command_response(body)
-        self.send_message(
-            mto=message["from"],
+        from_jid = str(JID(message["from"]).bare)
+
+        async def notify(reply_body: str) -> None:
+            self._send_reply(message["from"], reply_body)
+
+        response = await self.command_handler(from_jid, body, notify)
+        self._send_reply(message["from"], response.body, media=response.media)
+
+    def _send_reply(self, to_jid: str, body: str, media: tuple = ()) -> None:
+        body, media_references = XmppMessageXml.body_with_media_references(body, media)
+        message = self.make_message(
+            mto=to_jid,
             mfrom=self.bot_jid,
-            mbody=reply,
+            mbody=body,
             mtype="chat",
         )
+        for reference in media_references:
+            message.xml.append(reference)
+        message.send()
 
 
 class XmppComponent:
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, command_handler: CommandHandler) -> None:
         self.settings = settings
-        self.client = TelegramCommandComponent(settings)
+        self.client = TelegramCommandComponent(settings, command_handler)
         self._stopped = asyncio.Event()
 
     async def start(self) -> None:

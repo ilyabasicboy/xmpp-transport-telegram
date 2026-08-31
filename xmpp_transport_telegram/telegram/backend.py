@@ -1,7 +1,7 @@
-import os
-from typing import List
+from typing import List, Optional
 
 from telethon import TelegramClient
+from telethon.sessions import StringSession
 
 from xmpp_transport_telegram.runtime.config import Settings
 from xmpp_transport_telegram.telegram.models import TelegramDialog
@@ -11,11 +11,9 @@ class TelegramBackend:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
 
-    def client_for_account(self, account_key: str) -> TelegramClient:
-        os.makedirs(self.settings.telegram_session_storage_dir, exist_ok=True)
-        session_path = os.path.join(self.settings.telegram_session_storage_dir, account_key)
+    def client_for_session(self, session_data: Optional[str] = None) -> TelegramClient:
         return TelegramClient(
-            session_path,
+            StringSession(session_data or ""),
             self.settings.telegram_api_id,
             self.settings.telegram_api_hash,
         )

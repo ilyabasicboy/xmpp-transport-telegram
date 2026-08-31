@@ -3,3 +3,4 @@ slixmpp>=1.8,<1.12
 telethon>=1.36,<2
 asyncpg>=0.29,<1
 cryptography>=42,<46
+qrcode>=7.4,<9

@@ -96,14 +96,18 @@ venv/bin/python -m xmpp_transport_telegram --config config.ini
 The process creates its PostgreSQL tables on startup and exposes:
 
 - `GET /health`
+- `GET /qr/<file>.svg`
+
+The transport stores Telegram login QR SVG files under `server.qr_storage_dir`.
+Set `server.qr_base_url` to the externally reachable base URL of this
+transport's HTTP listener; `/qr` is added automatically.
 
 ## User Flow
 
-Planned command contact commands:
+Command contact commands:
 
 ```text
-/login <phone>
-/code <code>
+/login
 /password <password>
 /status
 /contacts
@@ -112,10 +116,13 @@ Planned command contact commands:
 /help
 ```
 
-Telegram user authorization is code/password based rather than QR-first for the
-initial implementation. Production work should replace `/code` and `/password`
-chat commands with short-lived HTTPS forms so secrets do not remain in XMPP
-history.
+Telegram user authorization starts with a Telethon QR login token. Send `/login`
+to `bot@telegram.example.com`, then scan the returned SVG QR from a device
+already signed in to Telegram before it expires. If Telegram requires a cloud
+password after accepting the login, send `/password <password>`.
+
+Production work should replace `/password` chat commands with a short-lived
+HTTPS form so secrets do not remain in XMPP history.
 
 ## Boundaries
 
