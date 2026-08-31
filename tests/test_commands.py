@@ -189,7 +189,7 @@ async def _test_login_starts_qr_authorization():
     await asyncio.sleep(0)
 
     assert notifications == [
-        "Telegram account connected as @telegram_user. Synced 2 Telegram contacts into the Telegram circle."
+        "Telegram account connected as @telegram_user. Synced 2 Telegram direct chats into the Telegram circle."
     ]
     assert synced == [
         ("user@example.com", 100),
@@ -223,10 +223,10 @@ async def _test_contacts_uses_full_contact_list_and_pages_output():
 
     response = await service.handle("user@example.com", "/contacts 2", notify)
 
-    assert "Telegram contacts, page 2/2:" in response.body
+    assert "Telegram direct chats, page 2/2:" in response.body
     assert "51. Contact 051" in response.body
     assert "55. Contact 055" in response.body
-    assert "Sync all listed Telegram contacts: /sync-contacts" in response.body
+    assert "Sync all listed Telegram direct chats: /sync-contacts" in response.body
 
 
 def test_add_and_sync_contacts_call_roster_callback():
@@ -261,7 +261,7 @@ async def _test_add_and_sync_contacts_call_roster_callback():
     sync_response = await service.handle("user@example.com", "/sync-contacts", notify)
 
     assert add_response.body == "Telegram contact added to Xabber: Bob"
-    assert sync_response.body == "Telegram contacts synchronized with Xabber: 2."
+    assert sync_response.body == "Telegram direct chats synchronized with Xabber: 2."
     assert synced == [
         ("user@example.com", 200),
         ("user@example.com", 100),
@@ -291,6 +291,6 @@ async def _test_login_reports_replaced_previous_xmpp_binding():
 
     assert notifications == [
         "Telegram account connected as @telegram_user. "
-        "Telegram returned no address-book contacts to sync. "
+        "Telegram returned no direct chats to sync. "
         "Previous XMPP binding old@example.com was replaced."
     ]

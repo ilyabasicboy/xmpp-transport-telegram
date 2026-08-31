@@ -27,6 +27,7 @@ HELP_TEXT = """Telegram transport commands:
 
 NotifyCallback = Callable[[str], Awaitable[None]]
 EnsureContactCallback = Callable[[str, TelegramContact], Awaitable[None]]
+ConnectedSessionCallback = Callable[[str, str, Optional[str]], Awaitable[None]]
 
 
 @dataclass
@@ -64,11 +65,11 @@ def command_response(body: str) -> str:
     if command == "/status":
         return "Telegram account is not connected."
     if command == "/contacts":
-        return "Telegram contact listing requires the running transport service."
+            return "Telegram direct chat listing requires the running transport service."
     if command == "/add":
-        return "Telegram contact add requires the running transport service."
+            return "Telegram direct chat add requires the running transport service."
     if command == "/sync-contacts":
-        return "Telegram contact sync requires the running transport service."
+            return "Telegram direct chat sync requires the running transport service."
     if command == "/logout":
         return "Telegram logout requires the running transport service."
     return "Unknown command.\n\n%s" % HELP_TEXT
@@ -84,12 +85,14 @@ class CommandService:
         session_cipher: SessionCipher,
         qr_store: QrCodeStore,
         ensure_contact: EnsureContactCallback,
+        connected_session: Optional[ConnectedSessionCallback] = None,
     ) -> None:
         self.repository = repository
         self.telegram = telegram
         self.session_cipher = session_cipher
         self.qr_store = qr_store
         self.ensure_contact = ensure_contact
+        self.connected_session = connected_session
         self._qr_attempts: Dict[str, QrLoginAttempt] = {}
 
     async def handle(self, xmpp_jid: str, body: str, notify: NotifyCallback) -> ControlResponse:
@@ -135,9 +138,11 @@ class CommandService:
 
         if await client.is_user_authorized():
             user = await client.get_me()
-            previous_owner = await self._save_connected_session(account_id, client, user)
+            previous_owner = await self._save_connected_session(xmpp_jid, account_id, client, user)
             sync_message = await self._sync_contacts_after_login(xmpp_jid, client)
+            session_data = client.session.save()
             await client.disconnect()
+            await self._notify_connected_session(xmpp_jid, session_data, previous_owner)
             return self._response(
                 self._connected_message(user, sync_message, previous_owner)
             )
@@ -183,11 +188,13 @@ class CommandService:
         else:
             try:
                 previous_owner = await self._save_connected_session(
+                    xmpp_jid,
                     attempt.account_id,
                     attempt.client,
                     user,
                 )
                 sync_message = await self._sync_contacts_after_login(xmpp_jid, attempt.client)
+                session_data = attempt.client.session.save()
             except Exception:
                 log.exception("Telegram login finalization failed for %s", xmpp_jid)
                 await self._finish_failed_attempt(
@@ -195,8 +202,9 @@ class CommandService:
                     "Telegram login was accepted, but session finalization failed. Send /login to try again.",
                 )
             else:
-                await attempt.notify(self._connected_message(user, sync_message, previous_owner))
                 await self._discard_attempt(xmpp_jid)
+                await self._notify_connected_session(xmpp_jid, session_data, previous_owner)
+                await attempt.notify(self._connected_message(user, sync_message, previous_owner))
 
     async def _complete_password(self, xmpp_jid: str, password: str) -> str:
         if not password:
@@ -212,9 +220,16 @@ class CommandService:
             log.exception("Telegram cloud password failed for %s", xmpp_jid)
             return "Telegram cloud password was rejected. Send /password <password> to try again."
 
-        previous_owner = await self._save_connected_session(attempt.account_id, attempt.client, user)
+        previous_owner = await self._save_connected_session(
+            xmpp_jid,
+            attempt.account_id,
+            attempt.client,
+            user,
+        )
         sync_message = await self._sync_contacts_after_login(xmpp_jid, attempt.client)
+        session_data = attempt.client.session.save()
         await self._discard_attempt(xmpp_jid)
+        await self._notify_connected_session(xmpp_jid, session_data, previous_owner)
         return self._connected_message(user, sync_message, previous_owner)
 
     async def _status(self, xmpp_jid: str) -> str:
@@ -248,19 +263,19 @@ class CommandService:
 
     async def _contacts_response(self, xmpp_jid: str, argument: str) -> str:
         page = self._parse_contacts_page(argument)
-        # Telegram returns the address book as a full result set.  We keep that
+        # Telegram returns direct dialogs as a full result set.  We keep that
         # complete ordering for stable /add numbers, then page only the XMPP text.
         contacts = await self._list_contacts(xmpp_jid)
         if not contacts:
-            return "Telegram returned no address-book contacts."
+            return "Telegram returned no direct chats."
 
         start = (page - 1) * self.CONTACTS_PAGE_SIZE
         if start >= len(contacts):
-            return "There is no Telegram contacts page %s." % page
+            return "There is no Telegram direct chats page %s." % page
 
         shown = contacts[start : start + self.CONTACTS_PAGE_SIZE]
         total_pages = (len(contacts) + self.CONTACTS_PAGE_SIZE - 1) // self.CONTACTS_PAGE_SIZE
-        lines = ["Telegram contacts, page %s/%s:" % (page, total_pages)]
+        lines = ["Telegram direct chats, page %s/%s:" % (page, total_pages)]
         lines.extend(
             "%s. %s%s"
             % (
@@ -272,7 +287,7 @@ class CommandService:
         )
         lines.append("")
         lines.append("Add to Xabber: /add <number>")
-        lines.append("Sync all listed Telegram contacts: /sync-contacts")
+        lines.append("Sync all listed Telegram direct chats: /sync-contacts")
         if page < total_pages:
             lines.append("Next page: /contacts %s" % (page + 1))
         return "\n".join(lines)
@@ -285,12 +300,12 @@ class CommandService:
     async def _sync_contacts_response(self, xmpp_jid: str) -> str:
         contacts = await self._list_contacts(xmpp_jid)
         if not contacts:
-            return "Telegram returned no address-book contacts."
+            return "Telegram returned no direct chats."
         # Each contact goes through the same idempotent roster path as /add, so
         # bulk sync is safe to repeat after reconnects or metadata changes.
         for contact in contacts:
             await self.ensure_contact(xmpp_jid, contact)
-        return "Telegram contacts synchronized with Xabber: %s." % len(contacts)
+        return "Telegram direct chats synchronized with Xabber: %s." % len(contacts)
 
     async def _sync_contacts_after_login(self, xmpp_jid: str, client) -> str:
         try:
@@ -301,8 +316,8 @@ class CommandService:
             log.exception("Telegram contact sync after login failed for %s", xmpp_jid)
             return "Contact sync failed; send /sync-contacts to retry."
         if not contacts:
-            return "Telegram returned no address-book contacts to sync."
-        return "Synced %s Telegram contacts into the Telegram circle." % len(contacts)
+            return "Telegram returned no direct chats to sync."
+        return "Synced %s Telegram direct chats into the Telegram circle." % len(contacts)
 
     async def _list_contacts(self, xmpp_jid: str) -> List[TelegramContact]:
         client = await self._authorized_client(xmpp_jid)
@@ -339,16 +354,26 @@ class CommandService:
             return None
         return self.session_cipher.decrypt(row["encrypted_session"])
 
-    async def _save_connected_session(self, account_id: int, client, user):
+    async def _save_connected_session(self, xmpp_jid: str, account_id: int, client, user):
         session_data = client.session.save()
         encrypted_session = self.session_cipher.encrypt(session_data)
-        return await self.repository.upsert_telegram_session(
+        previous_owner = await self.repository.upsert_telegram_session(
             account_id,
             int(user.id),
             getattr(user, "phone", None),
             encrypted_session,
             True,
         )
+        return previous_owner
+
+    async def _notify_connected_session(
+        self,
+        xmpp_jid: str,
+        session_data: str,
+        previous_owner: Optional[str],
+    ) -> None:
+        if self.connected_session is not None:
+            await self.connected_session(xmpp_jid, session_data, previous_owner)
 
     async def _finish_failed_attempt(self, xmpp_jid: str, message: str) -> None:
         attempt = self._qr_attempts.get(xmpp_jid)

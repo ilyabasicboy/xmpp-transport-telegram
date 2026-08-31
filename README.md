@@ -125,11 +125,17 @@ password after accepting the login, send `/password <password>`.
 Production work should replace `/password` chat commands with a short-lived
 HTTPS form so secrets do not remain in XMPP history.
 
-After successful login, the transport loads the full Telegram address book
-through MTProto and pushes it into the Xabber roster under the `Telegram`
-circle. `/contacts` displays that full Telegram contact list in pages, `/add
-<number>` retries one listed contact, and `/sync-contacts` retries every
-returned Telegram contact through the roster helper module.
+After successful login, the transport loads Telegram address-book contacts and
+private dialogs through MTProto, then pushes them into the Xabber roster under
+the `Telegram` circle. That list includes bot chats, includes contacts without
+an existing chat, and excludes groups/channels. `/contacts` displays the direct
+chat/contact list in pages, `/add <number>` retries one listed entry, and
+`/sync-contacts` retries every returned entry through the roster helper module.
+
+Text messages sent to synced direct chat JIDs, such as
+`chat-<telegram_peer_id>@telegram.example.com`, are delivered to that Telegram
+peer. Incoming private Telegram text messages are delivered back to the bound
+XMPP account from the matching `chat-<telegram_peer_id>` JID.
 
 On transport restart, connected Telegram sessions are reopened and their
 address books are synchronized again through the same idempotent roster path.

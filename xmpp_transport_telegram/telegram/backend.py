@@ -1,3 +1,4 @@
+import logging
 from typing import List, Optional
 
 from telethon import TelegramClient
@@ -6,6 +7,9 @@ from telethon.tl.functions.contacts import GetContactsRequest
 
 from xmpp_transport_telegram.runtime.config import Settings
 from xmpp_transport_telegram.telegram.models import TelegramContact, TelegramDialog
+
+
+log = logging.getLogger(__name__)
 
 
 class TelegramBackend:
@@ -38,23 +42,59 @@ class TelegramBackend:
         return dialogs
 
     async def list_contacts(self, client: TelegramClient) -> List[TelegramContact]:
-        # hash=0 asks Telegram for the full address book instead of a
-        # not-modified shortcut.  The caller decides how much of it to display.
+        contacts_by_peer_id = {}
         result = await client(GetContactsRequest(hash=0))
-        contacts = []
         for user in getattr(result, "users", []):
-            if getattr(user, "bot", False):
-                continue
-            title = self._user_title(user)
-            contacts.append(
-                TelegramContact(
-                    peer_id=int(user.id),
-                    title=title,
-                    username=getattr(user, "username", None),
-                    phone=getattr(user, "phone", None),
-                )
+            peer_id = int(user.id)
+            contacts_by_peer_id[peer_id] = TelegramContact(
+                peer_id=peer_id,
+                title=self._user_title(user),
+                username=getattr(user, "username", None),
+                phone=getattr(user, "phone", None),
             )
-        return sorted(contacts, key=lambda contact: contact.title.lower())
+
+        async for dialog in client.iter_dialogs():
+            if bool(getattr(dialog, "is_group", False)) or bool(getattr(dialog, "is_channel", False)):
+                continue
+            entity = dialog.entity
+            peer_id = int(dialog.id)
+            if peer_id in contacts_by_peer_id:
+                continue
+            title = dialog.name or self._user_title(entity)
+            contacts_by_peer_id[peer_id] = TelegramContact(
+                peer_id=peer_id,
+                title=title,
+                username=getattr(entity, "username", None),
+                phone=getattr(entity, "phone", None),
+            )
+        return sorted(contacts_by_peer_id.values(), key=lambda contact: contact.title.lower())
+
+    async def send_direct_message(self, client: TelegramClient, peer_id: int, body: str) -> None:
+        entity = await self._resolve_direct_entity(client, peer_id)
+        log.debug(
+            "Resolved Telegram direct message entity peer_id=%s entity_type=%s body_length=%s",
+            peer_id,
+            type(entity).__name__,
+            len(body),
+        )
+        await client.send_message(entity, body)
+
+    async def _resolve_direct_entity(self, client: TelegramClient, peer_id: int):
+        result = await client(GetContactsRequest(hash=0))
+        for user in getattr(result, "users", []):
+            if int(user.id) == peer_id:
+                log.debug("Resolved Telegram peer_id=%s from address-book contacts", peer_id)
+                return user
+
+        async for dialog in client.iter_dialogs():
+            if bool(getattr(dialog, "is_group", False)) or bool(getattr(dialog, "is_channel", False)):
+                continue
+            if int(dialog.id) == peer_id:
+                log.debug("Resolved Telegram peer_id=%s from private dialogs", peer_id)
+                return dialog.entity
+
+        log.debug("Could not resolve Telegram direct peer_id=%s from contacts or private dialogs", peer_id)
+        raise ValueError("Telegram direct chat is not available. Send /sync-contacts and try again.")
 
     @staticmethod
     def _user_title(user) -> str:

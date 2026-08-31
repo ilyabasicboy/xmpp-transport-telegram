@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, Optional
 from xml.etree import ElementTree as ET
 
 from slixmpp import ComponentXMPP
@@ -19,10 +19,16 @@ CommandHandler = Callable[
     [str, str, Callable[[str], Awaitable[None]]],
     Awaitable[ControlResponse],
 ]
+DirectMessageHandler = Callable[[str, str, str], Awaitable[None]]
 
 
 class TelegramCommandComponent(ComponentXMPP):
-    def __init__(self, settings: Settings, command_handler: CommandHandler) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        command_handler: CommandHandler,
+        direct_message_handler: Optional[DirectMessageHandler] = None,
+    ) -> None:
         super().__init__(
             settings.xmpp_component_jid,
             settings.xmpp_component_secret,
@@ -31,6 +37,7 @@ class TelegramCommandComponent(ComponentXMPP):
         )
         self.settings = settings
         self.command_handler = command_handler
+        self.direct_message_handler = direct_message_handler
         self.bot_jid = "bot@%s" % settings.xmpp_component_jid
         self.transport_server_domain = settings.transport_server_domain
         self.component_domain = settings.xmpp_component_jid
@@ -62,11 +69,10 @@ class TelegramCommandComponent(ComponentXMPP):
             return
 
         to_jid = JID(message["to"])
-        if to_jid.bare != self.bot_jid:
-            log.debug("Ignoring message addressed to %s", to_jid.bare)
-            return
-
         from_jid = str(JID(message["from"]).bare)
+        if to_jid.bare != self.bot_jid:
+            await self._handle_direct_message(from_jid, to_jid, body)
+            return
 
         async def notify(reply_body: str) -> None:
             self._send_reply(message["from"], reply_body)
@@ -82,17 +88,52 @@ class TelegramCommandComponent(ComponentXMPP):
             return
         self._send_reply(message["from"], response.body, media=response.media)
 
+    async def _handle_direct_message(self, from_jid: str, to_jid: JID, body: str) -> None:
+        if self.direct_message_handler is None:
+            log.debug("Ignoring direct message addressed to %s without handler", to_jid.bare)
+            return
+        if to_jid.domain != self.component_domain:
+            log.debug("Ignoring direct message addressed outside component domain: %s", to_jid.bare)
+            return
+        try:
+            await self.direct_message_handler(from_jid, to_jid.bare, body)
+        except (RuntimeError, ValueError) as exc:
+            self._send_chat(str(from_jid), str(to_jid.bare), str(exc))
+        except Exception:
+            log.exception("Telegram direct message failed from %s to %s", from_jid, to_jid.bare)
+            self._send_chat(
+                str(from_jid),
+                str(to_jid.bare),
+                "Telegram message failed. Try again later.",
+            )
+
     def _send_reply(self, to_jid: str, body: str, media: tuple = ()) -> None:
         body, media_references = XmppMessageXml.body_with_media_references(body, media)
-        message = self.make_message(
-            mto=to_jid,
-            mfrom=self.bot_jid,
-            mbody=body,
-            mtype="chat",
-        )
+        message = self._make_chat_message(to_jid, self.bot_jid, body)
         for reference in media_references:
             message.xml.append(reference)
         message.send()
+
+    def send_direct_message(self, to_jid: str, peer_id: int, body: str) -> None:
+        from_jid = "chat-%s@%s" % (peer_id, self.component_domain)
+        log.debug(
+            "Sending incoming Telegram message as XMPP stanza from=%s to=%s body_length=%s",
+            from_jid,
+            to_jid,
+            len(body),
+        )
+        self._send_chat(to_jid, from_jid, body)
+
+    def _send_chat(self, to_jid: str, from_jid: str, body: str) -> None:
+        self._make_chat_message(to_jid, from_jid, body).send()
+
+    def _make_chat_message(self, to_jid: str, from_jid: str, body: str):
+        return self.make_message(
+            mto=to_jid,
+            mfrom=from_jid,
+            mbody=body,
+            mtype="chat",
+        )
 
     async def send_transport_operation(
         self,
@@ -130,9 +171,14 @@ class TelegramCommandComponent(ComponentXMPP):
 
 
 class XmppComponent:
-    def __init__(self, settings: Settings, command_handler: CommandHandler) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        command_handler: CommandHandler,
+        direct_message_handler: Optional[DirectMessageHandler] = None,
+    ) -> None:
         self.settings = settings
-        self.client = TelegramCommandComponent(settings, command_handler)
+        self.client = TelegramCommandComponent(settings, command_handler, direct_message_handler)
         self._stopped = asyncio.Event()
 
     async def start(self) -> None:

@@ -45,6 +45,7 @@ class FakeTelegramClient:
         self.connected = False
         self.disconnected = False
         self.session = FakeSession("stored-session")
+        self.handlers = []
 
     async def connect(self):
         self.connected = True
@@ -54,6 +55,9 @@ class FakeTelegramClient:
 
     async def is_user_authorized(self):
         return self.authorized
+
+    def add_event_handler(self, handler, event_builder):
+        self.handlers.append((handler, event_builder))
 
 
 class FakeTelegramBackend:
