@@ -3,6 +3,7 @@ TRANSPORT_FAKE_OUTGOING_TAG = "{%s}fake-outgoing" % TRANSPORT_TELEGRAM_NS
 GROUPS_NS = "https://xabber.com/protocol/groups"
 XABBER_REFERENCES_NS = "https://xabber.com/protocol/references"
 FILES_NS = "https://xabber.com/protocol/files"
+FORWARDED_NS = "urn:xmpp:forward:0"
 SID_NS = "urn:xmpp:sid:0"
 CHAT_MARKERS_NS = "urn:xmpp:chat-markers:0"
 NICK_NS = "http://jabber.org/protocol/nick"

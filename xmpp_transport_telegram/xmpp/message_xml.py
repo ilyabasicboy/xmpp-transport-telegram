@@ -2,11 +2,16 @@ from xml.etree import ElementTree as ET
 from typing import Optional
 
 from xmpp_transport_telegram.xmpp.namespaces import (
+    CHAT_MARKERS_NS,
     FILES_NS,
+    FORWARDED_NS,
     GROUPS_NS,
     PUBSUB_AVATAR_METADATA_THUMBNAIL_NS,
+    SID_NS,
+    TRANSPORT_FAKE_OUTGOING_TAG,
     XABBER_REFERENCES_NS,
 )
+from xmpp_transport_telegram.xmpp.models import XmppReplyReference
 
 
 class XmppMessageXml:
@@ -78,6 +83,114 @@ class XmppMessageXml:
     @classmethod
     def escaped_text_len(cls, value: str) -> int:
         return cls.utf16_len(cls.xml_escaped_text(value))
+
+    @classmethod
+    def extract_reply_to_message_ids(cls, msg) -> tuple:
+        body = str(msg["body"] or "")
+        for child in msg.xml:
+            if child.tag != "{%s}reference" % XABBER_REFERENCES_NS:
+                continue
+            reply_to_message_ids = cls.reply_target_message_ids(child)
+            if not reply_to_message_ids:
+                continue
+            body = cls.strip_reply_fallback_body(body)
+            return reply_to_message_ids, body
+        return (), body
+
+    @staticmethod
+    def reply_target_message_ids(reference: ET.Element) -> tuple:
+        message = XmppMessageXml.forwarded_message(reference)
+        if message is None:
+            return ()
+        origin_ids = []
+        stanza_ids = []
+        for child in message:
+            if child.tag == "{%s}origin-id" % SID_NS:
+                origin_id = child.attrib.get("id")
+                if origin_id:
+                    origin_ids.append(origin_id)
+            if child.tag == "{%s}stanza-id" % SID_NS:
+                stanza_id = child.attrib.get("id")
+                if stanza_id:
+                    stanza_ids.append(stanza_id)
+        message_id = message.attrib.get("id")
+        candidates = origin_ids + ([message_id] if message_id else []) + stanza_ids
+        return tuple(dict.fromkeys(candidate for candidate in candidates if candidate))
+
+    @staticmethod
+    def forwarded_message(reference: ET.Element) -> Optional[ET.Element]:
+        forwarded = reference.find("{%s}forwarded" % FORWARDED_NS)
+        if forwarded is None:
+            return None
+        for child in forwarded:
+            if child.tag == "{jabber:client}message" or child.tag.rsplit("}", 1)[-1] == "message":
+                return child
+        return None
+
+    @staticmethod
+    def message_candidate_ids(msg) -> tuple:
+        candidates = []
+        message_id = str(msg["id"] or "").strip()
+        if message_id:
+            candidates.append(message_id)
+        for child in msg.xml:
+            if child.tag == "{%s}origin-id" % SID_NS:
+                origin_id = child.attrib.get("id")
+                if origin_id:
+                    candidates.append(origin_id)
+            if child.tag == "{%s}stanza-id" % SID_NS:
+                stanza_id = child.attrib.get("id")
+                if stanza_id:
+                    candidates.append(stanza_id)
+        return tuple(dict.fromkeys(candidate for candidate in candidates if candidate))
+
+    @classmethod
+    def reply_reference_element(cls, reply_reference: XmppReplyReference) -> ET.Element:
+        fallback_prefix = cls.reply_fallback_prefix(reply_reference)
+        reference = ET.Element(
+            "{%s}reference" % XABBER_REFERENCES_NS,
+            {
+                "type": "mutable",
+                "begin": "0",
+                "end": str(cls.escaped_text_len(fallback_prefix)),
+            },
+        )
+        forwarded = ET.SubElement(reference, "{%s}forwarded" % FORWARDED_NS)
+        message = ET.SubElement(
+            forwarded,
+            "{jabber:client}message",
+            {
+                "from": reply_reference.sender,
+                "to": reply_reference.recipient,
+                "type": "chat",
+                "id": reply_reference.message_id,
+            },
+        )
+        ET.SubElement(message, "{%s}markable" % CHAT_MARKERS_NS)
+        ET.SubElement(message, "{%s}origin-id" % SID_NS, {"id": reply_reference.message_id})
+        if reply_reference.fake_outgoing:
+            ET.SubElement(message, TRANSPORT_FAKE_OUTGOING_TAG)
+        body = ET.SubElement(message, "{jabber:client}body")
+        body.text = reply_reference.body
+        return reference
+
+    @staticmethod
+    def reply_fallback_prefix(reply_reference: XmppReplyReference) -> str:
+        quoted_lines = reply_reference.body.splitlines() or [reply_reference.body]
+        quoted_text = "\n".join("> %s" % line for line in quoted_lines)
+        return "> %s:\n%s\n" % (reply_reference.sender, quoted_text)
+
+    @staticmethod
+    def strip_reply_fallback_body(body: str) -> str:
+        if not body.startswith("> "):
+            return body
+        lines = body.splitlines()
+        index = 0
+        while index < len(lines) and lines[index].startswith("> "):
+            index += 1
+        if index >= len(lines):
+            return body
+        return "\n".join(lines[index:]).lstrip("\n")
 
     @classmethod
     def group_sender_jid(cls, msg) -> Optional[str]:

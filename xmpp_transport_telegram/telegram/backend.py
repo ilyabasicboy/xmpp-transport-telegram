@@ -87,25 +87,51 @@ class TelegramBackend:
             )
         return sorted(groups, key=lambda group: group.title.lower())
 
-    async def send_direct_message(self, client: TelegramClient, peer_id: int, body: str) -> None:
+    async def send_direct_message(
+        self,
+        client: TelegramClient,
+        peer_id: int,
+        body: str,
+        reply_to_message_id: Optional[str] = None,
+    ) -> Optional[str]:
         entity = await self._resolve_direct_entity(client, peer_id)
         log.debug(
-            "Resolved Telegram direct message entity peer_id=%s entity_type=%s body_length=%s",
+            "Resolved Telegram direct message entity peer_id=%s entity_type=%s body_length=%s reply_to=%s",
             peer_id,
             type(entity).__name__,
             len(body),
+            reply_to_message_id,
         )
-        await client.send_message(entity, body)
+        sent = await client.send_message(
+            entity,
+            body,
+            reply_to=int(reply_to_message_id) if reply_to_message_id else None,
+        )
+        message_id = getattr(sent, "id", None)
+        return str(message_id) if message_id is not None else None
 
-    async def send_group_message(self, client: TelegramClient, peer_id: int, body: str) -> None:
+    async def send_group_message(
+        self,
+        client: TelegramClient,
+        peer_id: int,
+        body: str,
+        reply_to_message_id: Optional[str] = None,
+    ) -> Optional[str]:
         entity = await self._resolve_group_entity(client, peer_id)
         log.debug(
-            "Resolved Telegram group message entity peer_id=%s entity_type=%s body_length=%s",
+            "Resolved Telegram group message entity peer_id=%s entity_type=%s body_length=%s reply_to=%s",
             peer_id,
             type(entity).__name__,
             len(body),
+            reply_to_message_id,
         )
-        await client.send_message(entity, body)
+        sent = await client.send_message(
+            entity,
+            body,
+            reply_to=int(reply_to_message_id) if reply_to_message_id else None,
+        )
+        message_id = getattr(sent, "id", None)
+        return str(message_id) if message_id is not None else None
 
     async def _resolve_direct_entity(self, client: TelegramClient, peer_id: int):
         result = await client(GetContactsRequest(hash=0))

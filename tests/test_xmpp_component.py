@@ -57,12 +57,13 @@ class FakeComponentClient:
 
 
 class FakeMessage:
-    def __init__(self, from_jid, to_jid, body, message_type="chat", xml=None):
+    def __init__(self, from_jid, to_jid, body, message_type="chat", xml=None, message_id="xmpp-1"):
         self.values = {
             "from": from_jid,
             "to": to_jid,
             "body": body,
             "type": message_type,
+            "id": message_id,
         }
         self.xml = xml if xml is not None else ET.Element("message")
 
@@ -96,7 +97,7 @@ def test_xabber_group_service_message_to_bot_does_not_run_command_handler():
             command_calls.append((_from_jid, _body))
             return ControlResponse("unexpected")
 
-        async def direct_message_handler(_from_jid, _to_jid, _body, _group_sender_jid):
+        async def direct_message_handler(_message):
             raise AssertionError("direct handler should not be called")
 
         client = TelegramCommandComponent(
@@ -124,8 +125,8 @@ def test_xabber_group_user_message_to_bot_runs_direct_handler():
         async def command_handler(_from_jid, _body, _notify):
             raise AssertionError("command handler should not be called")
 
-        async def direct_message_handler(from_jid, to_jid, body, group_sender_jid):
-            direct_calls.append((from_jid, to_jid, body, group_sender_jid))
+        async def direct_message_handler(message):
+            direct_calls.append(message)
 
         x = ET.Element("{%s}x" % GROUPS_NS)
         user = ET.SubElement(x, "{%s}user" % GROUPS_NS)
@@ -148,13 +149,10 @@ def test_xabber_group_user_message_to_bot_runs_direct_handler():
             )
         )
 
-        assert direct_calls == [
-            (
-                "telegramg-74657374406578616d706c652e636f6d--5386493808@example.com",
-                "bot@telegram.example.com",
-                "hello tg",
-                "test@example.com",
-            )
-        ]
+        assert len(direct_calls) == 1
+        assert direct_calls[0].sender == "telegramg-74657374406578616d706c652e636f6d--5386493808@example.com"
+        assert direct_calls[0].recipient == "bot@telegram.example.com"
+        assert direct_calls[0].body == "hello tg"
+        assert direct_calls[0].group_sender_jid == "test@example.com"
 
     asyncio.run(run_test())

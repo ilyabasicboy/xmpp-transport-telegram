@@ -38,8 +38,9 @@ class FakeClient:
         for dialog in self.dialogs:
             yield dialog
 
-    async def send_message(self, entity, body):
-        self.sent_messages.append((entity, body))
+    async def send_message(self, entity, body, reply_to=None):
+        self.sent_messages.append((entity, body, reply_to))
+        return type("FakeSentMessage", (), {"id": 777})()
 
 
 def test_list_contacts_merges_address_book_and_private_dialogs():
@@ -84,7 +85,7 @@ async def _test_send_direct_message_resolves_private_dialog_entity():
 
     await backend.send_direct_message(client, 200, "hello bot")
 
-    assert client.sent_messages == [(bot_entity, "hello bot")]
+    assert client.sent_messages == [(bot_entity, "hello bot", None)]
 
 
 def test_send_direct_message_resolves_address_book_entity_first():
@@ -99,7 +100,22 @@ async def _test_send_direct_message_resolves_address_book_entity_first():
 
     await backend.send_direct_message(client, 100, "hello alice")
 
-    assert client.sent_messages == [(contact_entity, "hello alice")]
+    assert client.sent_messages == [(contact_entity, "hello alice", None)]
+
+
+def test_send_direct_message_passes_reply_to_telegram():
+    asyncio.run(_test_send_direct_message_passes_reply_to_telegram())
+
+
+async def _test_send_direct_message_passes_reply_to_telegram():
+    backend = TelegramBackend(_settings())
+    bot_entity = FakeEntity(user_id=200, username="test_bot", bot=True)
+    client = FakeClient([FakeDialog(200, "Bot", bot_entity)])
+
+    message_id = await backend.send_direct_message(client, 200, "hello bot", reply_to_message_id="123")
+
+    assert message_id == "777"
+    assert client.sent_messages == [(bot_entity, "hello bot", 123)]
 
 
 def test_list_group_chats_returns_groups_and_channels():
@@ -126,6 +142,10 @@ def test_send_group_message_resolves_group_dialog_entity():
     asyncio.run(_test_send_group_message_resolves_group_dialog_entity())
 
 
+def test_send_group_message_passes_reply_to_telegram():
+    asyncio.run(_test_send_group_message_passes_reply_to_telegram())
+
+
 async def _test_send_group_message_resolves_group_dialog_entity():
     backend = TelegramBackend(_settings())
     group_entity = FakeEntity(username="team")
@@ -138,7 +158,18 @@ async def _test_send_group_message_resolves_group_dialog_entity():
 
     await backend.send_group_message(client, -100500, "hello team")
 
-    assert client.sent_messages == [(group_entity, "hello team")]
+    assert client.sent_messages == [(group_entity, "hello team", None)]
+
+
+async def _test_send_group_message_passes_reply_to_telegram():
+    backend = TelegramBackend(_settings())
+    group_entity = FakeEntity(username="team")
+    client = FakeClient([FakeDialog(-100500, "Team", group_entity, is_group=True)])
+
+    message_id = await backend.send_group_message(client, -100500, "hello team", reply_to_message_id="321")
+
+    assert message_id == "777"
+    assert client.sent_messages == [(group_entity, "hello team", 321)]
 
 
 def _settings():

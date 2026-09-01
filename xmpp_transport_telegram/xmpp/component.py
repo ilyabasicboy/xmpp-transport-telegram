@@ -11,6 +11,7 @@ from xmpp_transport_telegram.core.commands import ControlResponse
 from xmpp_transport_telegram.runtime.config import Settings
 from xmpp_transport_telegram.xmpp.groups_protocol import XabberGroupsXml
 from xmpp_transport_telegram.xmpp.message_xml import XmppMessageXml
+from xmpp_transport_telegram.xmpp.models import XmppIncomingMessage, XmppReplyReference
 from xmpp_transport_telegram.xmpp.namespaces import (
     GROUPS_NS,
     TRANSPORT_FAKE_OUTGOING_TAG,
@@ -25,7 +26,7 @@ CommandHandler = Callable[
     [str, str, Callable[[str], Awaitable[None]]],
     Awaitable[ControlResponse],
 ]
-DirectMessageHandler = Callable[[str, str, str, Optional[str]], Awaitable[None]]
+DirectMessageHandler = Callable[[XmppIncomingMessage], Awaitable[None]]
 
 
 class TelegramCommandComponent(ComponentXMPP):
@@ -87,10 +88,10 @@ class TelegramCommandComponent(ComponentXMPP):
             log.debug("Ignoring Xabber group service message from %s", from_jid)
             return
         if to_jid.bare == self.bot_jid and group_sender_jid is not None:
-            await self._handle_direct_message(from_jid, to_jid, body, group_sender_jid)
+            await self._handle_direct_message(message, from_jid, to_jid, body, group_sender_jid)
             return
         if to_jid.bare != self.bot_jid:
-            await self._handle_direct_message(from_jid, to_jid, body, group_sender_jid)
+            await self._handle_direct_message(message, from_jid, to_jid, body, group_sender_jid)
             return
 
         async def notify(reply_body: str) -> None:
@@ -109,6 +110,7 @@ class TelegramCommandComponent(ComponentXMPP):
 
     async def _handle_direct_message(
         self,
+        message,
         from_jid: str,
         to_jid: JID,
         body: str,
@@ -121,7 +123,20 @@ class TelegramCommandComponent(ComponentXMPP):
             log.debug("Ignoring direct message addressed outside component domain: %s", to_jid.bare)
             return
         try:
-            await self.direct_message_handler(from_jid, to_jid.bare, body, group_sender_jid)
+            reply_to_message_ids, body = XmppMessageXml.extract_reply_to_message_ids(message)
+            reply_to_message_id = reply_to_message_ids[0] if reply_to_message_ids else None
+            await self.direct_message_handler(
+                XmppIncomingMessage(
+                    sender=from_jid,
+                    recipient=to_jid.bare,
+                    body=body.strip(),
+                    group_sender_jid=group_sender_jid,
+                    message_id=str(message["id"] or "") or None,
+                    message_ids=XmppMessageXml.message_candidate_ids(message),
+                    reply_to_message_id=reply_to_message_id,
+                    reply_to_message_ids=reply_to_message_ids,
+                )
+            )
         except (RuntimeError, ValueError) as exc:
             self._send_chat(str(from_jid), str(to_jid.bare), str(exc))
         except Exception:
@@ -139,7 +154,15 @@ class TelegramCommandComponent(ComponentXMPP):
             message.xml.append(reference)
         message.send()
 
-    def send_direct_message(self, to_jid: str, peer_id: int, body: str) -> None:
+    def send_direct_message(
+        self,
+        to_jid: str,
+        peer_id: int,
+        body: str,
+        message_id: Optional[str] = None,
+        reply_reference: Optional[XmppReplyReference] = None,
+        fake_outgoing: bool = False,
+    ) -> None:
         from_jid = "chat-%s@%s" % (peer_id, self.component_domain)
         log.debug(
             "Sending incoming Telegram message as XMPP stanza from=%s to=%s body_length=%s",
@@ -147,7 +170,18 @@ class TelegramCommandComponent(ComponentXMPP):
             to_jid,
             len(body),
         )
-        self._send_chat(to_jid, from_jid, body)
+        if reply_reference is not None:
+            body = XmppMessageXml.reply_fallback_prefix(reply_reference) + body
+        message = self._make_chat_message(to_jid, from_jid, body)
+        if message_id:
+            message["id"] = message_id
+            for marker in XabberGroupsXml.message_markers(message_id):
+                message.xml.append(marker)
+        if fake_outgoing:
+            message.xml.append(ET.Element(TRANSPORT_FAKE_OUTGOING_TAG))
+        if reply_reference is not None:
+            message.xml.append(XmppMessageXml.reply_reference_element(reply_reference))
+        message.send()
 
     def send_xabber_group_message(
         self,
@@ -155,8 +189,11 @@ class TelegramCommandComponent(ComponentXMPP):
         group_jid: str,
         body: str,
         message_id: str,
+        reply_reference: Optional[XmppReplyReference] = None,
         fake_outgoing: bool = False,
     ) -> None:
+        if reply_reference is not None:
+            body = XmppMessageXml.reply_fallback_prefix(reply_reference) + body
         message = self.make_message(
             mfrom=sender,
             mto=group_jid,
@@ -168,6 +205,8 @@ class TelegramCommandComponent(ComponentXMPP):
             message.xml.append(marker)
         if fake_outgoing:
             message.xml.append(ET.Element(TRANSPORT_FAKE_OUTGOING_TAG))
+        if reply_reference is not None:
+            message.xml.append(XmppMessageXml.reply_reference_element(reply_reference))
         message.send()
 
     def _send_chat(self, to_jid: str, from_jid: str, body: str) -> None:

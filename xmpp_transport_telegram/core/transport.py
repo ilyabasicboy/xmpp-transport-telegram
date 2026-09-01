@@ -7,11 +7,13 @@ from telethon import events
 from xmpp_transport_telegram.core.commands import CommandService
 from xmpp_transport_telegram.core.qr_store import QrCodeStore
 from xmpp_transport_telegram.core.session_manager import SessionCipher
+from xmpp_transport_telegram.core.state import DirectReplyContext
 from xmpp_transport_telegram.runtime.config import Settings
 from xmpp_transport_telegram.storage.repository import Repository
 from xmpp_transport_telegram.telegram.backend import TelegramBackend
 from xmpp_transport_telegram.telegram.models import TelegramDialog
 from xmpp_transport_telegram.xmpp.component import XmppComponent
+from xmpp_transport_telegram.xmpp.models import XmppIncomingMessage, XmppReplyReference
 
 
 log = logging.getLogger(__name__)
@@ -36,6 +38,10 @@ class TelegramTransport:
         )
         self.xmpp = XmppComponent(settings, self.commands.handle, self.send_direct_message)
         self._telegram_clients: Dict[str, object] = {}
+        self._direct_reply_contexts: Dict[tuple, DirectReplyContext] = {}
+        self._direct_reply_aliases: Dict[tuple, str] = {}
+        self._group_reply_contexts: Dict[tuple, DirectReplyContext] = {}
+        self._group_reply_aliases: Dict[tuple, str] = {}
         self._group_ensure_signatures: Dict[tuple, str] = {}
         self._group_protocol_members: set = set()
         self._stopped = asyncio.Event()
@@ -53,21 +59,22 @@ class TelegramTransport:
 
     async def send_direct_message(
         self,
-        xmpp_jid: str,
-        contact_jid: str,
-        body: str,
-        group_sender_jid: Optional[str] = None,
+        message: XmppIncomingMessage,
     ) -> None:
-        group_route = self._bot_group_fanout_route(xmpp_jid, contact_jid, group_sender_jid)
+        xmpp_jid = message.sender
+        contact_jid = message.recipient
+        body = message.body
+        group_route = self._bot_group_fanout_route(xmpp_jid, contact_jid, message.group_sender_jid)
         if group_route is not None:
             owner_jid, chat_id = group_route
             await self._send_xabber_group_message_to_telegram(
                 owner_jid,
                 chat_id,
-                self._strip_xabber_group_sender_prefix(body, group_sender_jid),
+                message,
+                body=self._strip_xabber_group_sender_prefix(body, message.group_sender_jid),
             )
             return
-        if contact_jid == self.xmpp.client.bot_jid and group_sender_jid is not None:
+        if contact_jid == self.xmpp.client.bot_jid and message.group_sender_jid is not None:
             return
 
         localpart = self.xmpp.client.parse_component_localpart(contact_jid)
@@ -75,7 +82,8 @@ class TelegramTransport:
             await self._send_xabber_group_message_to_telegram(
                 xmpp_jid,
                 localpart.removeprefix("group-"),
-                body,
+                message,
+                body=body,
             )
             return
 
@@ -92,7 +100,32 @@ class TelegramTransport:
             peer_id,
             len(body),
         )
-        await self.telegram.send_direct_message(client, peer_id, body)
+        reply_to_message_id, body = self._resolve_direct_reply_payload(xmpp_jid, str(peer_id), message)
+        sent_message_id = await self.telegram.send_direct_message(
+            client,
+            peer_id,
+            body,
+            reply_to_message_id=reply_to_message_id,
+        )
+        if sent_message_id:
+            self._remember_direct_reply_context(
+                xmpp_jid=xmpp_jid,
+                peer_id=str(peer_id),
+                context=DirectReplyContext(
+                    message_id=sent_message_id,
+                    body=body,
+                    sender=xmpp_jid,
+                    recipient=contact_jid,
+                    fake_outgoing=True,
+                ),
+            )
+            if message.message_id:
+                self._remember_direct_reply_alias(
+                    xmpp_jid=xmpp_jid,
+                    peer_id=str(peer_id),
+                    source_message_id=message.message_id,
+                    target_message_id=sent_message_id,
+                )
         log.debug(
             "Sent XMPP direct message to Telegram peer xmpp_jid=%s peer_id=%s",
             xmpp_jid,
@@ -396,9 +429,6 @@ class TelegramTransport:
         )
         is_outgoing = getattr(event, "out", False)
         is_group_chat = self._is_telegram_group_chat_event(event)
-        if is_outgoing and not is_group_chat:
-            log.debug("Ignoring outgoing private Telegram event for %s", xmpp_jid)
-            return
         body = str(getattr(event, "raw_text", "") or "").strip()
         if not body:
             log.debug("Ignoring Telegram event without text body for %s", xmpp_jid)
@@ -416,7 +446,33 @@ class TelegramTransport:
             peer_id,
             len(body),
         )
-        self.xmpp.client.send_direct_message(xmpp_jid, int(peer_id), body)
+        message_id = self._incoming_telegram_message_id(event)
+        reply_reference = self._direct_reply_reference(
+            xmpp_jid,
+            str(peer_id),
+            self._incoming_telegram_reply_to_message_id(event),
+        )
+        fake_outgoing = bool(is_outgoing)
+        self.xmpp.client.send_direct_message(
+            xmpp_jid,
+            int(peer_id),
+            body,
+            message_id=message_id,
+            reply_reference=reply_reference,
+            fake_outgoing=fake_outgoing,
+        )
+        contact_jid = "chat-%s@%s" % (peer_id, self.settings.xmpp_component_jid)
+        self._remember_direct_reply_context(
+            xmpp_jid=xmpp_jid,
+            peer_id=str(peer_id),
+            context=DirectReplyContext(
+                message_id=message_id,
+                body=body,
+                sender=xmpp_jid if fake_outgoing else contact_jid,
+                recipient=contact_jid if fake_outgoing else xmpp_jid,
+                fake_outgoing=fake_outgoing,
+            ),
+        )
         log.debug(
             "Delivered incoming Telegram message to XMPP xmpp_jid=%s peer_id=%s",
             xmpp_jid,
@@ -471,6 +527,11 @@ class TelegramTransport:
         if not getattr(event, "out", False):
             body = self._format_group_body(sender_name, body)
         message_id = self._incoming_telegram_message_id(event)
+        reply_reference = self._group_reply_reference(
+            xmpp_jid,
+            str(peer_id),
+            self._incoming_telegram_reply_to_message_id(event),
+        )
         log.debug(
             "Delivering incoming Telegram group message to Xabber xmpp_jid=%s group_jid=%s sender=%s body_length=%s",
             xmpp_jid,
@@ -483,13 +544,26 @@ class TelegramTransport:
             group_jid=group_jid,
             body=body,
             message_id=message_id,
+            reply_reference=reply_reference,
             fake_outgoing=True,
+        )
+        self._remember_group_reply_context(
+            xmpp_jid=xmpp_jid,
+            peer_id=str(peer_id),
+            context=DirectReplyContext(
+                message_id=message_id,
+                body=body,
+                sender=sender,
+                recipient=group_jid,
+                fake_outgoing=True,
+            ),
         )
 
     async def _send_xabber_group_message_to_telegram(
         self,
         xmpp_jid: str,
         chat_id: str,
+        message: XmppIncomingMessage,
         body: str,
     ) -> None:
         session_data = await self._load_connected_session_data(xmpp_jid)
@@ -503,7 +577,33 @@ class TelegramTransport:
             chat_id,
             len(body),
         )
-        await self.telegram.send_group_message(client, int(chat_id), body)
+        reply_to_message_id, body = self._resolve_group_reply_payload(xmpp_jid, chat_id, message, body)
+        sent_message_id = await self.telegram.send_group_message(
+            client,
+            int(chat_id),
+            body,
+            reply_to_message_id=reply_to_message_id,
+        )
+        if sent_message_id:
+            group_jid = self._group_jid(chat_id, xmpp_jid)
+            self._remember_group_reply_context(
+                xmpp_jid=xmpp_jid,
+                peer_id=chat_id,
+                context=DirectReplyContext(
+                    message_id=sent_message_id,
+                    body=body,
+                    sender=xmpp_jid,
+                    recipient=group_jid,
+                    fake_outgoing=True,
+                ),
+            )
+            if message.message_id:
+                self._remember_group_reply_alias(
+                    xmpp_jid=xmpp_jid,
+                    peer_id=chat_id,
+                    source_message_id=message.message_id,
+                    target_message_id=sent_message_id,
+                )
 
     async def _telegram_group_dialog_for_event(self, event, peer_id: int) -> TelegramDialog:
         title = None
@@ -552,6 +652,238 @@ class TelegramTransport:
         if message_id is None:
             message_id = getattr(event, "id", None)
         return str(message_id) if message_id is not None else "telegram-message"
+
+    @staticmethod
+    def _incoming_telegram_reply_to_message_id(event) -> Optional[str]:
+        message = getattr(event, "message", None)
+        reply_to_msg_id = getattr(message, "reply_to_msg_id", None) if message is not None else None
+        if reply_to_msg_id is None and message is not None:
+            reply_to = getattr(message, "reply_to", None)
+            reply_to_msg_id = getattr(reply_to, "reply_to_msg_id", None) if reply_to is not None else None
+        return str(reply_to_msg_id) if reply_to_msg_id is not None else None
+
+    def _remember_direct_reply_context(
+        self,
+        xmpp_jid: str,
+        peer_id: str,
+        context: DirectReplyContext,
+    ) -> None:
+        self._direct_reply_contexts[(xmpp_jid, peer_id, context.message_id)] = context
+        self._remember_direct_reply_alias(
+            xmpp_jid=xmpp_jid,
+            peer_id=peer_id,
+            source_message_id=context.message_id,
+            target_message_id=context.message_id,
+        )
+
+    def _remember_direct_reply_alias(
+        self,
+        xmpp_jid: str,
+        peer_id: str,
+        source_message_id: str,
+        target_message_id: str,
+    ) -> None:
+        self._direct_reply_aliases[(xmpp_jid, peer_id, source_message_id)] = target_message_id
+
+    def _resolve_direct_reply_target(
+        self,
+        xmpp_jid: str,
+        peer_id: str,
+        message: XmppIncomingMessage,
+    ) -> Optional[str]:
+        candidate_ids = message.reply_to_message_ids or (
+            (message.reply_to_message_id,) if message.reply_to_message_id else ()
+        )
+        for candidate_id in candidate_ids:
+            if (xmpp_jid, peer_id, candidate_id) in self._direct_reply_contexts:
+                return candidate_id
+            alias = self._direct_reply_aliases.get((xmpp_jid, peer_id, candidate_id))
+            if alias:
+                return alias
+        if message.reply_to_message_id and self._is_telegram_message_id(message.reply_to_message_id):
+            return message.reply_to_message_id
+        return None
+
+    def _resolve_direct_reply_payload(
+        self,
+        xmpp_jid: str,
+        peer_id: str,
+        message: XmppIncomingMessage,
+    ) -> tuple:
+        reply_to_message_id = self._resolve_direct_reply_target(xmpp_jid, peer_id, message)
+        if reply_to_message_id:
+            return reply_to_message_id, message.body
+
+        fallback_reply_to, stripped_body = self._resolve_direct_reply_from_fallback(
+            xmpp_jid,
+            peer_id,
+            message.body,
+        )
+        if fallback_reply_to:
+            return fallback_reply_to, stripped_body
+        return None, message.body
+
+    @staticmethod
+    def _is_telegram_message_id(value: str) -> bool:
+        try:
+            return int(value) > 0
+        except (TypeError, ValueError):
+            return False
+
+    def _resolve_direct_reply_from_fallback(
+        self,
+        xmpp_jid: str,
+        peer_id: str,
+        body: str,
+    ) -> tuple:
+        quoted_body, stripped_body = self._split_quoted_reply_fallback(body)
+        if not quoted_body or stripped_body == body:
+            return None, body
+        normalized_quote = self._normalized_reply_text(quoted_body)
+        if not normalized_quote:
+            return None, body
+        prefix = (xmpp_jid, peer_id)
+        for key, context in reversed(list(self._direct_reply_contexts.items())):
+            if key[:2] != prefix:
+                continue
+            normalized_context = self._normalized_reply_text(context.body)
+            if normalized_context and normalized_context in normalized_quote:
+                return context.message_id, stripped_body
+        return None, body
+
+    @staticmethod
+    def _split_quoted_reply_fallback(body: str) -> tuple:
+        lines = body.splitlines()
+        quoted_lines = []
+        index = 0
+        while index < len(lines) and lines[index].startswith(">"):
+            line = lines[index]
+            quoted_lines.append(line[2:] if line.startswith("> ") else line[1:])
+            index += 1
+        if not quoted_lines or index >= len(lines):
+            return "", body
+        return "\n".join(quoted_lines), "\n".join(lines[index:]).lstrip("\n")
+
+    @staticmethod
+    def _normalized_reply_text(body: str) -> str:
+        return "\n".join(line.strip() for line in body.splitlines()).strip()
+
+    def _direct_reply_reference(
+        self,
+        xmpp_jid: str,
+        peer_id: str,
+        reply_to_message_id: Optional[str],
+    ) -> Optional[XmppReplyReference]:
+        if not reply_to_message_id:
+            return None
+        context = self._direct_reply_contexts.get((xmpp_jid, peer_id, reply_to_message_id))
+        if context is None:
+            return None
+        return XmppReplyReference(
+            message_id=context.message_id,
+            body=context.body,
+            sender=context.sender,
+            recipient=context.recipient,
+            fake_outgoing=context.fake_outgoing,
+        )
+
+    def _remember_group_reply_context(
+        self,
+        xmpp_jid: str,
+        peer_id: str,
+        context: DirectReplyContext,
+    ) -> None:
+        self._group_reply_contexts[(xmpp_jid, peer_id, context.message_id)] = context
+        self._remember_group_reply_alias(
+            xmpp_jid=xmpp_jid,
+            peer_id=peer_id,
+            source_message_id=context.message_id,
+            target_message_id=context.message_id,
+        )
+
+    def _remember_group_reply_alias(
+        self,
+        xmpp_jid: str,
+        peer_id: str,
+        source_message_id: str,
+        target_message_id: str,
+    ) -> None:
+        self._group_reply_aliases[(xmpp_jid, peer_id, source_message_id)] = target_message_id
+
+    def _resolve_group_reply_payload(
+        self,
+        xmpp_jid: str,
+        peer_id: str,
+        message: XmppIncomingMessage,
+        body: str,
+    ) -> tuple:
+        reply_to_message_id = self._resolve_group_reply_target(xmpp_jid, peer_id, message)
+        if reply_to_message_id:
+            _quoted_body, stripped_body = self._split_quoted_reply_fallback(body)
+            return reply_to_message_id, stripped_body
+        fallback_reply_to, stripped_body = self._resolve_group_reply_from_fallback(xmpp_jid, peer_id, body)
+        if fallback_reply_to:
+            return fallback_reply_to, stripped_body
+        return None, body
+
+    def _resolve_group_reply_target(
+        self,
+        xmpp_jid: str,
+        peer_id: str,
+        message: XmppIncomingMessage,
+    ) -> Optional[str]:
+        candidate_ids = message.reply_to_message_ids or (
+            (message.reply_to_message_id,) if message.reply_to_message_id else ()
+        )
+        for candidate_id in candidate_ids:
+            if (xmpp_jid, peer_id, candidate_id) in self._group_reply_contexts:
+                return candidate_id
+            alias = self._group_reply_aliases.get((xmpp_jid, peer_id, candidate_id))
+            if alias:
+                return alias
+        if message.reply_to_message_id and self._is_telegram_message_id(message.reply_to_message_id):
+            return message.reply_to_message_id
+        return None
+
+    def _resolve_group_reply_from_fallback(
+        self,
+        xmpp_jid: str,
+        peer_id: str,
+        body: str,
+    ) -> tuple:
+        quoted_body, stripped_body = self._split_quoted_reply_fallback(body)
+        if not quoted_body or stripped_body == body:
+            return None, body
+        normalized_quote = self._normalized_reply_text(quoted_body)
+        if not normalized_quote:
+            return None, body
+        prefix = (xmpp_jid, peer_id)
+        for key, context in reversed(list(self._group_reply_contexts.items())):
+            if key[:2] != prefix:
+                continue
+            normalized_context = self._normalized_reply_text(context.body)
+            if normalized_context and normalized_context in normalized_quote:
+                return context.message_id, stripped_body
+        return None, body
+
+    def _group_reply_reference(
+        self,
+        xmpp_jid: str,
+        peer_id: str,
+        reply_to_message_id: Optional[str],
+    ) -> Optional[XmppReplyReference]:
+        if not reply_to_message_id:
+            return None
+        context = self._group_reply_contexts.get((xmpp_jid, peer_id, reply_to_message_id))
+        if context is None:
+            return None
+        return XmppReplyReference(
+            message_id=context.message_id,
+            body=context.body,
+            sender=context.sender,
+            recipient=context.recipient,
+            fake_outgoing=context.fake_outgoing,
+        )
 
     def _group_jid(self, chat_id: str, owner_jid: str) -> str:
         return "%s@%s" % (
