@@ -6,7 +6,7 @@ from cryptography.fernet import Fernet
 from xmpp_transport_telegram.core.session_manager import SessionCipher
 from xmpp_transport_telegram.core.transport import TelegramTransport
 from xmpp_transport_telegram.runtime.config import Settings
-from xmpp_transport_telegram.telegram.models import TelegramContact
+from xmpp_transport_telegram.telegram.models import TelegramContact, TelegramDialog
 from xmpp_transport_telegram.xmpp.component import XmppComponent
 
 
@@ -61,9 +61,10 @@ class FakeTelegramClient:
 
 
 class FakeTelegramBackend:
-    def __init__(self, contacts, authorized=True):
+    def __init__(self, contacts, authorized=True, groups=()):
         self.contacts = contacts
         self.authorized = authorized
+        self.groups = list(groups)
         self.clients = []
 
     def client_for_session(self, session_data=None):
@@ -74,14 +75,34 @@ class FakeTelegramBackend:
     async def list_contacts(self, client):
         return self.contacts
 
+    async def list_group_chats(self, client):
+        return self.groups
+
 
 class FakeXmppClient:
     def __init__(self):
         self.operations = []
+        self.created_groups = []
+        self.updated_groups = []
+        self.invites = []
+        self.direct_invites = []
 
     async def send_transport_operation(self, operation, fields, groups=(), timeout=10):
         self.operations.append((operation, fields, groups))
         return "updated"
+
+    async def create_xabber_group(self, **kwargs):
+        self.created_groups.append(kwargs)
+        return "%s@example.com" % kwargs["localpart"]
+
+    async def update_xabber_group_info(self, **kwargs):
+        self.updated_groups.append(kwargs)
+
+    async def invite_xabber_group_member(self, **kwargs):
+        self.invites.append(kwargs)
+
+    def send_xabber_group_invite(self, **kwargs):
+        self.direct_invites.append(kwargs)
 
 
 class FakeXmpp:
@@ -163,6 +184,35 @@ async def _test_restart_sync_pushes_contacts_for_connected_sessions():
             ("Telegram",),
         ),
     ]
+
+
+def test_restart_sync_does_not_create_xabber_groups_for_telegram_groups():
+    asyncio.run(_test_restart_sync_does_not_create_xabber_groups_for_telegram_groups())
+
+
+async def _test_restart_sync_does_not_create_xabber_groups_for_telegram_groups():
+    settings = _settings()
+    repository = FakeRepository()
+    encrypted_session = SessionCipher(settings.session_encryption_key).encrypt("stored-session")
+    repository.connected_sessions = [
+        {
+            "xmpp_jid": "user@example.com",
+            "encrypted_session": encrypted_session,
+        }
+    ]
+    transport = TelegramTransport(settings, repository)
+    transport.xmpp = FakeXmpp()
+    transport.telegram = FakeTelegramBackend(
+        [],
+        groups=[TelegramDialog(peer_id=-100500, title="Telegram Team", is_group=True)],
+    )
+
+    await transport._sync_connected_contacts_after_restart()
+
+    assert transport.xmpp.client.created_groups == []
+    assert transport.xmpp.client.updated_groups == []
+    assert transport.xmpp.client.invites == []
+    assert transport.xmpp.client.direct_invites == []
 
 
 def test_restart_sync_skips_expired_telegram_session():

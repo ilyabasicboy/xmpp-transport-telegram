@@ -1,4 +1,10 @@
 TRANSPORT_TELEGRAM_NS = "urn:xabber:transport:telegram:1"
+TRANSPORT_FAKE_OUTGOING_TAG = "{%s}fake-outgoing" % TRANSPORT_TELEGRAM_NS
+GROUPS_NS = "https://xabber.com/protocol/groups"
 XABBER_REFERENCES_NS = "https://xabber.com/protocol/references"
 FILES_NS = "https://xabber.com/protocol/files"
+SID_NS = "urn:xmpp:sid:0"
+CHAT_MARKERS_NS = "urn:xmpp:chat-markers:0"
+NICK_NS = "http://jabber.org/protocol/nick"
+PUBSUB_AVATAR_METADATA_NS = "urn:xmpp:avatar:metadata"
 PUBSUB_AVATAR_METADATA_THUMBNAIL_NS = "urn:xmpp:avatar:metadata"

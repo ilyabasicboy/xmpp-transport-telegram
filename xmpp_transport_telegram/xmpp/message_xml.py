@@ -1,7 +1,9 @@
 from xml.etree import ElementTree as ET
+from typing import Optional
 
 from xmpp_transport_telegram.xmpp.namespaces import (
     FILES_NS,
+    GROUPS_NS,
     PUBSUB_AVATAR_METADATA_THUMBNAIL_NS,
     XABBER_REFERENCES_NS,
 )
@@ -76,3 +78,37 @@ class XmppMessageXml:
     @classmethod
     def escaped_text_len(cls, value: str) -> int:
         return cls.utf16_len(cls.xml_escaped_text(value))
+
+    @classmethod
+    def group_sender_jid(cls, msg) -> Optional[str]:
+        groups_x = msg.xml.find("{%s}x" % GROUPS_NS)
+        if groups_x is None:
+            return None
+        user = cls.child_by_local_name(groups_x, "user", namespace=GROUPS_NS)
+        if user is None:
+            return None
+        jid = cls.child_by_local_name(user, "jid")
+        if jid is None:
+            return None
+        value = (jid.text or "").strip()
+        if not value:
+            return None
+        return value.split("/", 1)[0]
+
+    @staticmethod
+    def child_by_local_name(
+        parent: ET.Element,
+        local_name: str,
+        namespace: Optional[str] = None,
+    ) -> Optional[ET.Element]:
+        for child in parent:
+            if XmppMessageXml.local_name(child.tag) != local_name:
+                continue
+            if namespace is not None and not str(child.tag).startswith("{%s}" % namespace):
+                continue
+            return child
+        return None
+
+    @staticmethod
+    def local_name(tag: str) -> str:
+        return tag.rsplit("}", 1)[-1]

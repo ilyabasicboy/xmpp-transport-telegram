@@ -102,6 +102,45 @@ async def _test_send_direct_message_resolves_address_book_entity_first():
     assert client.sent_messages == [(contact_entity, "hello alice")]
 
 
+def test_list_group_chats_returns_groups_and_channels():
+    asyncio.run(_test_list_group_chats_returns_groups_and_channels())
+
+
+async def _test_list_group_chats_returns_groups_and_channels():
+    backend = TelegramBackend(_settings())
+    dialogs = [
+        FakeDialog(200, "Bot", FakeEntity(username="test_bot")),
+        FakeDialog(-100500, "Team", FakeEntity(username="team"), is_group=True),
+        FakeDialog(-100600, "News", FakeEntity(username="news"), is_channel=True),
+    ]
+
+    groups = await backend.list_group_chats(FakeClient(dialogs))
+
+    assert [(group.peer_id, group.title, group.is_group, group.is_channel) for group in groups] == [
+        (-100600, "News", False, True),
+        (-100500, "Team", True, False),
+    ]
+
+
+def test_send_group_message_resolves_group_dialog_entity():
+    asyncio.run(_test_send_group_message_resolves_group_dialog_entity())
+
+
+async def _test_send_group_message_resolves_group_dialog_entity():
+    backend = TelegramBackend(_settings())
+    group_entity = FakeEntity(username="team")
+    client = FakeClient(
+        [
+            FakeDialog(200, "Bot", FakeEntity(username="test_bot")),
+            FakeDialog(-100500, "Team", group_entity, is_group=True),
+        ]
+    )
+
+    await backend.send_group_message(client, -100500, "hello team")
+
+    assert client.sent_messages == [(group_entity, "hello team")]
+
+
 def _settings():
     return Settings(
         database_url="postgresql://example",

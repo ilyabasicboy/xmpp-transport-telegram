@@ -69,10 +69,38 @@ class TelegramBackend:
             )
         return sorted(contacts_by_peer_id.values(), key=lambda contact: contact.title.lower())
 
+    async def list_group_chats(self, client: TelegramClient) -> List[TelegramDialog]:
+        groups = []
+        async for dialog in client.iter_dialogs():
+            if not bool(getattr(dialog, "is_group", False)) and not bool(getattr(dialog, "is_channel", False)):
+                continue
+            entity = dialog.entity
+            groups.append(
+                TelegramDialog(
+                    peer_id=int(dialog.id),
+                    title=dialog.name or str(dialog.id),
+                    username=getattr(entity, "username", None),
+                    phone=getattr(entity, "phone", None),
+                    is_group=bool(getattr(dialog, "is_group", False)),
+                    is_channel=bool(getattr(dialog, "is_channel", False)),
+                )
+            )
+        return sorted(groups, key=lambda group: group.title.lower())
+
     async def send_direct_message(self, client: TelegramClient, peer_id: int, body: str) -> None:
         entity = await self._resolve_direct_entity(client, peer_id)
         log.debug(
             "Resolved Telegram direct message entity peer_id=%s entity_type=%s body_length=%s",
+            peer_id,
+            type(entity).__name__,
+            len(body),
+        )
+        await client.send_message(entity, body)
+
+    async def send_group_message(self, client: TelegramClient, peer_id: int, body: str) -> None:
+        entity = await self._resolve_group_entity(client, peer_id)
+        log.debug(
+            "Resolved Telegram group message entity peer_id=%s entity_type=%s body_length=%s",
             peer_id,
             type(entity).__name__,
             len(body),
@@ -95,6 +123,17 @@ class TelegramBackend:
 
         log.debug("Could not resolve Telegram direct peer_id=%s from contacts or private dialogs", peer_id)
         raise ValueError("Telegram direct chat is not available. Send /sync-contacts and try again.")
+
+    async def _resolve_group_entity(self, client: TelegramClient, peer_id: int):
+        async for dialog in client.iter_dialogs():
+            if not bool(getattr(dialog, "is_group", False)) and not bool(getattr(dialog, "is_channel", False)):
+                continue
+            if int(dialog.id) == peer_id:
+                log.debug("Resolved Telegram group peer_id=%s from dialogs", peer_id)
+                return dialog.entity
+
+        log.debug("Could not resolve Telegram group peer_id=%s from dialogs", peer_id)
+        raise ValueError("Telegram group chat is not available.")
 
     @staticmethod
     def _user_title(user) -> str:
