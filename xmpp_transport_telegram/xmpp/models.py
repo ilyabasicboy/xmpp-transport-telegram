@@ -27,10 +27,20 @@ class XmppReplyReference:
 
 
 @dataclass(frozen=True)
+class XmppForwardReference:
+    message_id: str
+    body: str
+    sender: str
+    recipient: str
+    fake_outgoing: bool = False
+
+
+@dataclass(frozen=True)
 class XmppIncomingMessage:
     sender: str
     recipient: str
     body: str
+    forward_references: tuple = ()
     group_sender_jid: Optional[str] = None
     message_id: Optional[str] = None
     message_ids: tuple = ()

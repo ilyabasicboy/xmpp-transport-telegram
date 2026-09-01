@@ -9,7 +9,7 @@ from xmpp_transport_telegram.core.state import DirectReplyContext
 from xmpp_transport_telegram.core.transport import TelegramTransport
 from xmpp_transport_telegram.runtime.config import Settings
 from xmpp_transport_telegram.telegram.models import TelegramDialog
-from xmpp_transport_telegram.xmpp.models import XmppIncomingMessage
+from xmpp_transport_telegram.xmpp.models import XmppForwardReference, XmppIncomingMessage
 
 
 class FakeRepository:
@@ -87,8 +87,8 @@ class FakeTelegramBackend:
         self.clients.append(client)
         return client
 
-    async def send_direct_message(self, client, peer_id, body, reply_to_message_id=None):
-        self.sent.append((peer_id, body, reply_to_message_id))
+    async def send_direct_message(self, client, peer_id, body, reply_to_message_id=None, forward_reference=None):
+        self.sent.append((peer_id, body, reply_to_message_id, forward_reference))
         sent = await client.send_message(peer_id, body, reply_to=reply_to_message_id)
         return str(sent.id)
 
@@ -98,8 +98,8 @@ class FakeTelegramBackend:
     async def list_group_chats(self, client):
         return self.groups
 
-    async def send_group_message(self, client, peer_id, body, reply_to_message_id=None):
-        self.group_sent.append((peer_id, body, reply_to_message_id))
+    async def send_group_message(self, client, peer_id, body, reply_to_message_id=None, forward_reference=None):
+        self.group_sent.append((peer_id, body, reply_to_message_id, forward_reference))
         sent = await client.send_message(peer_id, body, reply_to=reply_to_message_id)
         return str(sent.id)
 
@@ -116,8 +116,19 @@ class FakeXmppClient:
         self.bot_jid = "bot@telegram.example.com"
         self.invite_error = None
 
-    def send_direct_message(self, to_jid, peer_id, body, message_id=None, reply_reference=None, fake_outgoing=False):
-        self.direct_messages.append((to_jid, peer_id, body, message_id, reply_reference, fake_outgoing))
+    def send_direct_message(
+        self,
+        to_jid,
+        peer_id,
+        body,
+        message_id=None,
+        reply_reference=None,
+        forward_references=(),
+        fake_outgoing=False,
+    ):
+        self.direct_messages.append(
+            (to_jid, peer_id, body, message_id, reply_reference, forward_references, fake_outgoing)
+        )
 
     def send_xabber_group_message(self, **kwargs):
         self.group_messages.append(kwargs)
@@ -175,6 +186,7 @@ class FakeEvent:
         sender_last_name=None,
         sender_username=None,
         reply_to_msg_id=None,
+        fwd_from=None,
     ):
         self.chat_id = chat_id
         self.raw_text = raw_text
@@ -192,7 +204,7 @@ class FakeEvent:
         self.message = type(
             "FakeEventMessage",
             (),
-            {"id": message_id, "reply_to_msg_id": reply_to_msg_id},
+            {"id": message_id, "reply_to_msg_id": reply_to_msg_id, "fwd_from": fwd_from},
         )()
 
     async def get_chat(self):
@@ -209,6 +221,29 @@ class FakeEvent:
                 "username": self.sender_username,
             },
         )()
+
+
+class FakeTelegramPeer:
+    def __init__(self, user_id=None, chat_id=None, channel_id=None):
+        self.user_id = user_id
+        self.chat_id = chat_id
+        self.channel_id = channel_id
+
+
+class FakeForwardHeader:
+    def __init__(
+        self,
+        from_id=None,
+        from_name=None,
+        saved_from_peer=None,
+        saved_from_msg_id=None,
+        channel_post=None,
+    ):
+        self.from_id = from_id
+        self.from_name = from_name
+        self.saved_from_peer = saved_from_peer
+        self.saved_from_msg_id = saved_from_msg_id
+        self.channel_post = channel_post
 
 
 class FakeSession:
@@ -247,7 +282,7 @@ async def _test_xmpp_direct_message_sends_to_telegram_peer():
         )
     )
 
-    assert transport.telegram.sent == [(100, "hello telegram", None)]
+    assert transport.telegram.sent == [(100, "hello telegram", None, None)]
     listener_client = transport.telegram.clients[0]
     assert len(listener_client.handlers) == 2
     assert listener_client.disconnected is False
@@ -267,6 +302,10 @@ def test_xmpp_direct_reply_ignores_unknown_non_numeric_reply_id():
 
 def test_xmpp_direct_reply_resolves_xabber_quote_fallback():
     asyncio.run(_test_xmpp_direct_reply_resolves_xabber_quote_fallback())
+
+
+def test_xmpp_direct_forward_uses_telegram_native_forward():
+    asyncio.run(_test_xmpp_direct_forward_uses_telegram_native_forward())
 
 
 async def _test_xmpp_direct_reply_sends_telegram_reply_to_message_id():
@@ -302,7 +341,7 @@ async def _test_xmpp_direct_reply_sends_telegram_reply_to_message_id():
         )
     )
 
-    assert transport.telegram.sent == [(100, "reply text", "901")]
+    assert transport.telegram.sent == [(100, "reply text", "901", None)]
 
 
 async def _test_xmpp_direct_reply_ignores_unknown_non_numeric_reply_id():
@@ -327,7 +366,7 @@ async def _test_xmpp_direct_reply_ignores_unknown_non_numeric_reply_id():
         )
     )
 
-    assert transport.telegram.sent == [(100, "reply text", None)]
+    assert transport.telegram.sent == [(100, "reply text", None, None)]
 
 
 async def _test_xmpp_direct_reply_resolves_xabber_quote_fallback():
@@ -385,7 +424,42 @@ async def _test_xmpp_direct_reply_resolves_xabber_quote_fallback():
         )
     )
 
-    assert transport.telegram.sent == [(100, "test", "902")]
+    assert transport.telegram.sent == [(100, "test", "902", None)]
+
+
+async def _test_xmpp_direct_forward_uses_telegram_native_forward():
+    settings = _settings()
+    cipher = SessionCipher(settings.session_encryption_key)
+    repository = FakeRepository()
+    repository.session = {
+        "telegram_user_id": 42,
+        "phone": None,
+        "encrypted_session": cipher.encrypt("stored-session"),
+        "connected": True,
+    }
+    transport = TelegramTransport(settings, repository)
+    transport.telegram = FakeTelegramBackend()
+
+    await transport.send_direct_message(
+        XmppIncomingMessage(
+            sender="user@example.com",
+            recipient="chat-100@telegram.example.com",
+            body="forward comment",
+            forward_references=(
+                XmppForwardReference(
+                    message_id="777",
+                    body="forwarded text",
+                    sender="chat-200@telegram.example.com",
+                    recipient="user@example.com",
+                ),
+            ),
+        )
+    )
+
+    peer_id, body, reply_to_message_id, forward_reference = transport.telegram.sent[0]
+    assert (peer_id, body, reply_to_message_id) == (100, "forward comment", None)
+    assert forward_reference.source_peer_id == 200
+    assert forward_reference.message_id == "777"
 
 
 async def _test_xmpp_direct_message_rejects_non_chat_contact_jid():
@@ -419,7 +493,7 @@ async def _test_incoming_telegram_direct_message_sends_to_xmpp_user():
     )
 
     assert transport.xmpp.client.direct_messages == [
-        ("user@example.com", 100, "hello xabber", "900", None, False)
+        ("user@example.com", 100, "hello xabber", "900", None, (), False)
     ]
 
 
@@ -437,7 +511,7 @@ async def _test_incoming_telegram_direct_message_can_use_sender_id():
     )
 
     assert transport.xmpp.client.direct_messages == [
-        ("user@example.com", 200, "hello from bot", "900", None, False)
+        ("user@example.com", 200, "hello from bot", "900", None, (), False)
     ]
 
 
@@ -447,6 +521,10 @@ def test_incoming_telegram_direct_reply_sends_xabber_reply_reference():
 
 def test_outgoing_telegram_direct_self_reply_is_synced_to_xabber():
     asyncio.run(_test_outgoing_telegram_direct_self_reply_is_synced_to_xabber())
+
+
+def test_incoming_telegram_direct_forward_sends_xabber_forward_reference():
+    asyncio.run(_test_incoming_telegram_direct_forward_sends_xabber_forward_reference())
 
 
 async def _test_incoming_telegram_direct_reply_sends_xabber_reply_reference():
@@ -469,8 +547,11 @@ async def _test_incoming_telegram_direct_reply_sends_xabber_reply_reference():
     )
 
     assert len(transport.xmpp.client.direct_messages) == 1
-    to_jid, peer_id, body, message_id, reply_reference, fake_outgoing = transport.xmpp.client.direct_messages[0]
+    to_jid, peer_id, body, message_id, reply_reference, forward_references, fake_outgoing = (
+        transport.xmpp.client.direct_messages[0]
+    )
     assert (to_jid, peer_id, body, message_id) == ("user@example.com", 100, "reply", "901")
+    assert forward_references == ()
     assert fake_outgoing is False
     assert reply_reference is not None
     assert reply_reference.message_id == "900"
@@ -497,11 +578,49 @@ async def _test_outgoing_telegram_direct_self_reply_is_synced_to_xabber():
     )
 
     assert len(transport.xmpp.client.direct_messages) == 1
-    to_jid, peer_id, body, message_id, reply_reference, fake_outgoing = transport.xmpp.client.direct_messages[0]
+    to_jid, peer_id, body, message_id, reply_reference, forward_references, fake_outgoing = (
+        transport.xmpp.client.direct_messages[0]
+    )
     assert (to_jid, peer_id, body, message_id) == ("user@example.com", 100, "self reply", "901")
+    assert forward_references == ()
     assert fake_outgoing is True
     assert reply_reference is not None
     assert reply_reference.message_id == "900"
+
+
+async def _test_incoming_telegram_direct_forward_sends_xabber_forward_reference():
+    transport = TelegramTransport(_settings(), FakeRepository())
+    transport.xmpp = FakeXmpp()
+
+    await transport._handle_incoming_telegram_message(
+        "user@example.com",
+        FakeEvent(
+            chat_id=100,
+            raw_text="forwarded direct text",
+            message_id=920,
+            fwd_from=FakeForwardHeader(
+                from_id=FakeTelegramPeer(user_id=200),
+                saved_from_msg_id=777,
+            ),
+        ),
+    )
+
+    assert len(transport.xmpp.client.direct_messages) == 1
+    to_jid, peer_id, body, message_id, reply_reference, forward_references, fake_outgoing = (
+        transport.xmpp.client.direct_messages[0]
+    )
+    assert (to_jid, peer_id, body, message_id, reply_reference, fake_outgoing) == (
+        "user@example.com",
+        100,
+        "",
+        "920",
+        None,
+        False,
+    )
+    assert len(forward_references) == 1
+    assert forward_references[0].message_id == "777"
+    assert forward_references[0].body == "forwarded direct text"
+    assert forward_references[0].sender == "chat-200@telegram.example.com"
 
 
 def test_incoming_telegram_message_syncs_outgoing_private_and_ignores_empty_messages():
@@ -522,7 +641,7 @@ async def _test_incoming_telegram_message_syncs_outgoing_private_and_ignores_emp
     )
 
     assert transport.xmpp.client.direct_messages == [
-        ("user@example.com", 100, "outgoing", "900", None, True)
+        ("user@example.com", 100, "outgoing", "900", None, (), True)
     ]
     assert transport.xmpp.client.group_messages == []
 
@@ -591,6 +710,7 @@ async def _test_incoming_telegram_group_message_sends_to_xabber_group():
             "body": "Alice Smith:\nhello group",
             "message_id": "901",
             "reply_reference": None,
+            "forward_references": (),
             "fake_outgoing": True,
         }
     ]
@@ -625,6 +745,7 @@ async def _test_outgoing_telegram_group_message_sends_to_xabber_group_as_transpo
             "body": "sent from telegram",
             "message_id": "903",
             "reply_reference": None,
+            "forward_references": (),
             "fake_outgoing": True,
         }
     ]
@@ -665,6 +786,7 @@ async def _test_outgoing_telegram_public_message_with_ambiguous_private_flag_syn
             "body": "public post from telegram",
             "message_id": "904",
             "reply_reference": None,
+            "forward_references": (),
             "fake_outgoing": True,
         }
     ]
@@ -802,6 +924,7 @@ async def _test_already_invited_telegram_group_sender_is_auto_joined_before_mess
             "body": "member_name:\ntest123",
             "message_id": "178887",
             "reply_reference": None,
+            "forward_references": (),
             "fake_outgoing": True,
         }
     ]
@@ -821,6 +944,14 @@ def test_xabber_group_structured_reply_strips_visible_quote_fallback():
 
 def test_incoming_telegram_group_reply_sends_xabber_reply_reference():
     asyncio.run(_test_incoming_telegram_group_reply_sends_xabber_reply_reference())
+
+
+def test_xabber_group_forward_uses_telegram_native_forward():
+    asyncio.run(_test_xabber_group_forward_uses_telegram_native_forward())
+
+
+def test_incoming_telegram_group_forward_sends_xabber_forward_reference():
+    asyncio.run(_test_incoming_telegram_group_forward_sends_xabber_forward_reference())
 
 
 async def _test_xabber_group_fanout_sends_to_telegram_group():
@@ -847,7 +978,7 @@ async def _test_xabber_group_fanout_sends_to_telegram_group():
         )
     )
 
-    assert transport.telegram.group_sent == [(-100500, "hello telegram group", None)]
+    assert transport.telegram.group_sent == [(-100500, "hello telegram group", None, None)]
 
 
 async def _test_xabber_group_reply_sends_telegram_reply_to_message_id():
@@ -886,7 +1017,7 @@ async def _test_xabber_group_reply_sends_telegram_reply_to_message_id():
         )
     )
 
-    assert transport.telegram.group_sent == [(-100500, "reply text", "910")]
+    assert transport.telegram.group_sent == [(-100500, "reply text", "910", None)]
 
 
 async def _test_xabber_group_structured_reply_strips_visible_quote_fallback():
@@ -922,7 +1053,44 @@ async def _test_xabber_group_structured_reply_strips_visible_quote_fallback():
         )
     )
 
-    assert transport.telegram.group_sent == [(-100500, "test", "910")]
+    assert transport.telegram.group_sent == [(-100500, "test", "910", None)]
+
+
+async def _test_xabber_group_forward_uses_telegram_native_forward():
+    settings = _settings()
+    cipher = SessionCipher(settings.session_encryption_key)
+    repository = FakeRepository()
+    repository.session = {
+        "telegram_user_id": 42,
+        "phone": None,
+        "encrypted_session": cipher.encrypt("stored-session"),
+        "connected": True,
+    }
+    transport = TelegramTransport(settings, repository)
+    transport.telegram = FakeTelegramBackend()
+    group_jid = "telegramg-75736572406578616d706c652e636f6d--100500@example.com"
+
+    await transport.send_direct_message(
+        XmppIncomingMessage(
+            sender=group_jid,
+            recipient="bot@telegram.example.com",
+            body="user@example.com:\nforward comment",
+            group_sender_jid="user@example.com",
+            forward_references=(
+                XmppForwardReference(
+                    message_id="778",
+                    body="forwarded group text",
+                    sender="group--100600@telegram.example.com",
+                    recipient="user@example.com",
+                ),
+            ),
+        )
+    )
+
+    peer_id, body, reply_to_message_id, forward_reference = transport.telegram.group_sent[0]
+    assert (peer_id, body, reply_to_message_id) == (-100500, "", None)
+    assert forward_reference.source_peer_id == -100600
+    assert forward_reference.message_id == "778"
 
 
 async def _test_incoming_telegram_group_reply_sends_xabber_reply_reference():
@@ -961,6 +1129,39 @@ async def _test_incoming_telegram_group_reply_sends_xabber_reply_reference():
     assert sent["body"] == "Bob:\ngroup reply"
     assert sent["reply_reference"] is not None
     assert sent["reply_reference"].message_id == "910"
+
+
+async def _test_incoming_telegram_group_forward_sends_xabber_forward_reference():
+    repository = FakeRepository()
+    group_jid = "telegramg-75736572406578616d706c652e636f6d--100500@example.com"
+    repository.signatures[("user@example.com", group_jid)] = "Telegram Team\nTrue\nFalse"
+    transport = TelegramTransport(_settings(), repository)
+    transport.xmpp = FakeXmpp()
+
+    await transport._handle_incoming_telegram_message(
+        "user@example.com",
+        FakeEvent(
+            chat_id=-100500,
+            raw_text="forwarded group text",
+            is_private=False,
+            sender_id=201,
+            message_id=921,
+            title="Telegram Team",
+            sender_first_name="Bob",
+            fwd_from=FakeForwardHeader(
+                from_id=FakeTelegramPeer(channel_id=100600),
+                channel_post=778,
+            ),
+        ),
+    )
+
+    assert len(transport.xmpp.client.group_messages) == 1
+    sent = transport.xmpp.client.group_messages[0]
+    assert sent["body"] == ""
+    assert len(sent["forward_references"]) == 1
+    assert sent["forward_references"][0].message_id == "778"
+    assert sent["forward_references"][0].body == "forwarded group text"
+    assert sent["forward_references"][0].sender == "group--100100600@telegram.example.com"
 
 
 def test_transport_group_fanout_copy_is_ignored():

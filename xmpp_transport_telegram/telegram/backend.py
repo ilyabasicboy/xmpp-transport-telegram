@@ -6,7 +6,7 @@ from telethon.sessions import StringSession
 from telethon.tl.functions.contacts import GetContactsRequest
 
 from xmpp_transport_telegram.runtime.config import Settings
-from xmpp_transport_telegram.telegram.models import TelegramContact, TelegramDialog
+from xmpp_transport_telegram.telegram.models import TelegramContact, TelegramDialog, TelegramForwardReference
 
 
 log = logging.getLogger(__name__)
@@ -93,8 +93,14 @@ class TelegramBackend:
         peer_id: int,
         body: str,
         reply_to_message_id: Optional[str] = None,
+        forward_reference: Optional[TelegramForwardReference] = None,
     ) -> Optional[str]:
         entity = await self._resolve_direct_entity(client, peer_id)
+        if forward_reference is not None:
+            sent = await self._forward_message(client, entity, forward_reference)
+            if body:
+                await client.send_message(entity, body)
+            return sent
         log.debug(
             "Resolved Telegram direct message entity peer_id=%s entity_type=%s body_length=%s reply_to=%s",
             peer_id,
@@ -116,8 +122,14 @@ class TelegramBackend:
         peer_id: int,
         body: str,
         reply_to_message_id: Optional[str] = None,
+        forward_reference: Optional[TelegramForwardReference] = None,
     ) -> Optional[str]:
         entity = await self._resolve_group_entity(client, peer_id)
+        if forward_reference is not None:
+            sent = await self._forward_message(client, entity, forward_reference)
+            if body:
+                await client.send_message(entity, body)
+            return sent
         log.debug(
             "Resolved Telegram group message entity peer_id=%s entity_type=%s body_length=%s reply_to=%s",
             peer_id,
@@ -160,6 +172,34 @@ class TelegramBackend:
 
         log.debug("Could not resolve Telegram group peer_id=%s from dialogs", peer_id)
         raise ValueError("Telegram group chat is not available.")
+
+    async def _forward_message(
+        self,
+        client: TelegramClient,
+        target_entity,
+        forward_reference: TelegramForwardReference,
+    ) -> Optional[str]:
+        source_entity = await self._resolve_any_entity(client, forward_reference.source_peer_id)
+        log.debug(
+            "Forwarding Telegram message source_peer_id=%s message_id=%s target_entity_type=%s",
+            forward_reference.source_peer_id,
+            forward_reference.message_id,
+            type(target_entity).__name__,
+        )
+        sent = await client.forward_messages(
+            target_entity,
+            int(forward_reference.message_id),
+            from_peer=source_entity,
+        )
+        if isinstance(sent, list):
+            sent = sent[0] if sent else None
+        message_id = getattr(sent, "id", None)
+        return str(message_id) if message_id is not None else None
+
+    async def _resolve_any_entity(self, client: TelegramClient, peer_id: int):
+        if peer_id >= 0:
+            return await self._resolve_direct_entity(client, peer_id)
+        return await self._resolve_group_entity(client, peer_id)
 
     @staticmethod
     def _user_title(user) -> str:

@@ -18,3 +18,9 @@ class TelegramContact:
     title: str
     username: Optional[str] = None
     phone: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class TelegramForwardReference:
+    source_peer_id: int
+    message_id: str

@@ -11,9 +11,9 @@ from xmpp_transport_telegram.core.state import DirectReplyContext
 from xmpp_transport_telegram.runtime.config import Settings
 from xmpp_transport_telegram.storage.repository import Repository
 from xmpp_transport_telegram.telegram.backend import TelegramBackend
-from xmpp_transport_telegram.telegram.models import TelegramDialog
+from xmpp_transport_telegram.telegram.models import TelegramDialog, TelegramForwardReference
 from xmpp_transport_telegram.xmpp.component import XmppComponent
-from xmpp_transport_telegram.xmpp.models import XmppIncomingMessage, XmppReplyReference
+from xmpp_transport_telegram.xmpp.models import XmppForwardReference, XmppIncomingMessage, XmppReplyReference
 
 
 log = logging.getLogger(__name__)
@@ -101,11 +101,14 @@ class TelegramTransport:
             len(body),
         )
         reply_to_message_id, body = self._resolve_direct_reply_payload(xmpp_jid, str(peer_id), message)
+        forward_reference = None if reply_to_message_id else self._telegram_forward_reference_from_xmpp(message)
+        body = message.body if forward_reference is not None else self._flatten_forward_body(message, body=body)
         sent_message_id = await self.telegram.send_direct_message(
             client,
             peer_id,
             body,
             reply_to_message_id=reply_to_message_id,
+            forward_reference=forward_reference,
         )
         if sent_message_id:
             self._remember_direct_reply_context(
@@ -452,13 +455,19 @@ class TelegramTransport:
             str(peer_id),
             self._incoming_telegram_reply_to_message_id(event),
         )
+        forward_reference = self._forward_reference_from_telegram_event(
+            event,
+            fallback_recipient=xmpp_jid,
+        )
+        outgoing_body = "" if forward_reference is not None else body
         fake_outgoing = bool(is_outgoing)
         self.xmpp.client.send_direct_message(
             xmpp_jid,
             int(peer_id),
-            body,
+            outgoing_body,
             message_id=message_id,
             reply_reference=reply_reference,
+            forward_references=(forward_reference,) if forward_reference is not None else (),
             fake_outgoing=fake_outgoing,
         )
         contact_jid = "chat-%s@%s" % (peer_id, self.settings.xmpp_component_jid)
@@ -524,8 +533,15 @@ class TelegramTransport:
             nickname=sender_name,
             auto_join=sender.endswith("@%s" % self.settings.xmpp_component_jid),
         )
-        if not getattr(event, "out", False):
+        forward_reference = self._forward_reference_from_telegram_event(
+            event,
+            fallback_recipient=self._group_jid(str(peer_id), xmpp_jid),
+        )
+        if forward_reference is None and not getattr(event, "out", False):
             body = self._format_group_body(sender_name, body)
+        elif forward_reference is not None:
+            body = ""
+        context_body = forward_reference.body if forward_reference is not None else body
         message_id = self._incoming_telegram_message_id(event)
         reply_reference = self._group_reply_reference(
             xmpp_jid,
@@ -545,6 +561,7 @@ class TelegramTransport:
             body=body,
             message_id=message_id,
             reply_reference=reply_reference,
+            forward_references=(forward_reference,) if forward_reference is not None else (),
             fake_outgoing=True,
         )
         self._remember_group_reply_context(
@@ -552,7 +569,7 @@ class TelegramTransport:
             peer_id=str(peer_id),
             context=DirectReplyContext(
                 message_id=message_id,
-                body=body,
+                body=context_body,
                 sender=sender,
                 recipient=group_jid,
                 fake_outgoing=True,
@@ -578,11 +595,14 @@ class TelegramTransport:
             len(body),
         )
         reply_to_message_id, body = self._resolve_group_reply_payload(xmpp_jid, chat_id, message, body)
+        forward_reference = None if reply_to_message_id else self._telegram_forward_reference_from_xmpp(message)
+        body = "" if forward_reference is not None else self._flatten_forward_body(message, body=body)
         sent_message_id = await self.telegram.send_group_message(
             client,
             int(chat_id),
             body,
             reply_to_message_id=reply_to_message_id,
+            forward_reference=forward_reference,
         )
         if sent_message_id:
             group_jid = self._group_jid(chat_id, xmpp_jid)
@@ -884,6 +904,127 @@ class TelegramTransport:
             recipient=context.recipient,
             fake_outgoing=context.fake_outgoing,
         )
+
+    def _telegram_forward_reference_from_xmpp(
+        self,
+        message: XmppIncomingMessage,
+    ) -> Optional[TelegramForwardReference]:
+        for reference in message.forward_references:
+            if not reference.message_id or not self._is_telegram_message_id(reference.message_id):
+                continue
+            source_peer_id = self._peer_id_from_forward_jid(reference.sender)
+            if source_peer_id is None:
+                source_peer_id = self._peer_id_from_forward_jid(reference.recipient)
+            if source_peer_id is None:
+                continue
+            return TelegramForwardReference(
+                source_peer_id=source_peer_id,
+                message_id=reference.message_id,
+            )
+        return None
+
+    def _flatten_forward_body(self, message: XmppIncomingMessage, *, body: Optional[str] = None) -> str:
+        base_body = message.body if body is None else body
+        if not message.forward_references:
+            return base_body
+        forwarded_parts = [reference.body for reference in message.forward_references if reference.body]
+        if base_body:
+            forwarded_parts.append(base_body)
+        return "\n\n".join(forwarded_parts)
+
+    def _peer_id_from_forward_jid(self, jid: str) -> Optional[int]:
+        localpart = self.xmpp.client.parse_component_localpart(jid)
+        if localpart is not None and localpart.startswith("chat-"):
+            peer_id = self._int_or_none(localpart.removeprefix("chat-"))
+            if peer_id is not None:
+                return peer_id
+        if localpart is not None and localpart.startswith("group-"):
+            peer_id = self._int_or_none(localpart.removeprefix("group-"))
+            if peer_id is not None:
+                return peer_id
+        bare_localpart = jid.split("@", 1)[0]
+        if bare_localpart.startswith("telegramg-"):
+            parsed = self._parse_group_jid_localpart(bare_localpart)
+            if parsed is not None:
+                _owner_jid, chat_id = parsed
+                return self._int_or_none(chat_id)
+        return None
+
+    def _forward_reference_from_telegram_event(
+        self,
+        event,
+        *,
+        fallback_recipient: str,
+    ) -> Optional[XmppForwardReference]:
+        message = getattr(event, "message", None)
+        fwd_from = getattr(message, "fwd_from", None) if message is not None else None
+        if fwd_from is None:
+            return None
+        source_peer_id = self._telegram_forward_source_peer_id(fwd_from)
+        source_name = str(getattr(fwd_from, "from_name", "") or "").strip()
+        if source_peer_id is not None:
+            sender = self._telegram_forward_source_jid(source_peer_id)
+        elif source_name:
+            sender = self._group_transport_member_jid()
+        else:
+            return None
+        forwarded_body = str(getattr(event, "raw_text", "") or "").strip()
+        if not forwarded_body:
+            return None
+        if source_peer_id is None and source_name:
+            forwarded_body = "Forwarded from %s\n%s" % (source_name, forwarded_body)
+        message_id = self._telegram_forward_message_id(fwd_from)
+        return XmppForwardReference(
+            message_id=message_id or "",
+            body=forwarded_body,
+            sender=sender,
+            recipient=fallback_recipient,
+            fake_outgoing=False,
+        )
+
+    def _telegram_forward_source_jid(self, source_peer_id: int) -> str:
+        if source_peer_id < 0:
+            return "group-%s@%s" % (source_peer_id, self.settings.xmpp_component_jid)
+        return self._telegram_user_jid(source_peer_id)
+
+    @classmethod
+    def _telegram_forward_source_peer_id(cls, fwd_from) -> Optional[int]:
+        for attr in ("saved_from_peer", "from_id"):
+            peer = getattr(fwd_from, attr, None)
+            peer_id = cls._telegram_peer_id(peer)
+            if peer_id is not None:
+                return peer_id
+        return None
+
+    @staticmethod
+    def _telegram_forward_message_id(fwd_from) -> Optional[str]:
+        for attr in ("saved_from_msg_id", "channel_post"):
+            message_id = getattr(fwd_from, attr, None)
+            if message_id is not None:
+                return str(message_id)
+        return None
+
+    @staticmethod
+    def _telegram_peer_id(peer) -> Optional[int]:
+        if peer is None:
+            return None
+        user_id = getattr(peer, "user_id", None)
+        if user_id is not None:
+            return int(user_id)
+        chat_id = getattr(peer, "chat_id", None)
+        if chat_id is not None:
+            return -int(chat_id)
+        channel_id = getattr(peer, "channel_id", None)
+        if channel_id is not None:
+            return int("-100%s" % channel_id)
+        return None
+
+    @staticmethod
+    def _int_or_none(value: str) -> Optional[int]:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
 
     def _group_jid(self, chat_id: str, owner_jid: str) -> str:
         return "%s@%s" % (

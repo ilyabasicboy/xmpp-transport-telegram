@@ -4,6 +4,7 @@ from cryptography.fernet import Fernet
 
 from xmpp_transport_telegram.runtime.config import Settings
 from xmpp_transport_telegram.telegram.backend import TelegramBackend
+from xmpp_transport_telegram.telegram.models import TelegramForwardReference
 
 
 class FakeEntity:
@@ -30,6 +31,7 @@ class FakeClient:
         self.dialogs = dialogs
         self.users = users
         self.sent_messages = []
+        self.forwarded_messages = []
 
     async def __call__(self, request):
         return type("FakeContactsResult", (), {"users": list(self.users)})()
@@ -41,6 +43,10 @@ class FakeClient:
     async def send_message(self, entity, body, reply_to=None):
         self.sent_messages.append((entity, body, reply_to))
         return type("FakeSentMessage", (), {"id": 777})()
+
+    async def forward_messages(self, entity, message_id, from_peer=None):
+        self.forwarded_messages.append((entity, message_id, from_peer))
+        return type("FakeForwardedMessage", (), {"id": 888})()
 
 
 def test_list_contacts_merges_address_book_and_private_dialogs():
@@ -107,6 +113,10 @@ def test_send_direct_message_passes_reply_to_telegram():
     asyncio.run(_test_send_direct_message_passes_reply_to_telegram())
 
 
+def test_send_direct_message_forwards_from_source_peer():
+    asyncio.run(_test_send_direct_message_forwards_from_source_peer())
+
+
 async def _test_send_direct_message_passes_reply_to_telegram():
     backend = TelegramBackend(_settings())
     bot_entity = FakeEntity(user_id=200, username="test_bot", bot=True)
@@ -116,6 +126,24 @@ async def _test_send_direct_message_passes_reply_to_telegram():
 
     assert message_id == "777"
     assert client.sent_messages == [(bot_entity, "hello bot", 123)]
+
+
+async def _test_send_direct_message_forwards_from_source_peer():
+    backend = TelegramBackend(_settings())
+    target_entity = FakeEntity(user_id=200, username="target_bot", bot=True)
+    source_entity = FakeEntity(user_id=100, first_name="Alice")
+    client = FakeClient([FakeDialog(200, "Target", target_entity)], [source_entity])
+
+    message_id = await backend.send_direct_message(
+        client,
+        200,
+        "comment",
+        forward_reference=TelegramForwardReference(source_peer_id=100, message_id="456"),
+    )
+
+    assert message_id == "888"
+    assert client.forwarded_messages == [(target_entity, 456, source_entity)]
+    assert client.sent_messages == [(target_entity, "comment", None)]
 
 
 def test_list_group_chats_returns_groups_and_channels():
@@ -146,6 +174,10 @@ def test_send_group_message_passes_reply_to_telegram():
     asyncio.run(_test_send_group_message_passes_reply_to_telegram())
 
 
+def test_send_group_message_forwards_from_group_source_peer():
+    asyncio.run(_test_send_group_message_forwards_from_group_source_peer())
+
+
 async def _test_send_group_message_resolves_group_dialog_entity():
     backend = TelegramBackend(_settings())
     group_entity = FakeEntity(username="team")
@@ -170,6 +202,29 @@ async def _test_send_group_message_passes_reply_to_telegram():
 
     assert message_id == "777"
     assert client.sent_messages == [(group_entity, "hello team", 321)]
+
+
+async def _test_send_group_message_forwards_from_group_source_peer():
+    backend = TelegramBackend(_settings())
+    target_entity = FakeEntity(username="team")
+    source_entity = FakeEntity(username="news")
+    client = FakeClient(
+        [
+            FakeDialog(-100500, "Team", target_entity, is_group=True),
+            FakeDialog(-100600, "News", source_entity, is_channel=True),
+        ]
+    )
+
+    message_id = await backend.send_group_message(
+        client,
+        -100500,
+        "",
+        forward_reference=TelegramForwardReference(source_peer_id=-100600, message_id="457"),
+    )
+
+    assert message_id == "888"
+    assert client.forwarded_messages == [(target_entity, 457, source_entity)]
+    assert client.sent_messages == []
 
 
 def _settings():

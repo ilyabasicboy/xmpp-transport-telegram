@@ -11,7 +11,7 @@ from xmpp_transport_telegram.xmpp.namespaces import (
     TRANSPORT_FAKE_OUTGOING_TAG,
     XABBER_REFERENCES_NS,
 )
-from xmpp_transport_telegram.xmpp.models import XmppReplyReference
+from xmpp_transport_telegram.xmpp.models import XmppForwardReference, XmppReplyReference
 
 
 class XmppMessageXml:
@@ -90,12 +90,104 @@ class XmppMessageXml:
         for child in msg.xml:
             if child.tag != "{%s}reference" % XABBER_REFERENCES_NS:
                 continue
+            if cls.is_forward_reference(msg, child):
+                continue
             reply_to_message_ids = cls.reply_target_message_ids(child)
             if not reply_to_message_ids:
                 continue
             body = cls.strip_reply_fallback_body(body)
             return reply_to_message_ids, body
         return (), body
+
+    @classmethod
+    def extract_forwarded_body_and_references(cls, msg, body: str) -> tuple:
+        forward_references = []
+        fallback_ranges = []
+        for reference in msg.xml:
+            if reference.tag != "{%s}reference" % XABBER_REFERENCES_NS:
+                continue
+            if not cls.is_forward_reference(msg, reference):
+                continue
+            forwarded_message = cls.forwarded_message(reference)
+            if forwarded_message is None:
+                continue
+            reference_range = cls.reference_body_range(reference)
+            if reference_range is not None:
+                fallback_ranges.append(reference_range)
+            forwarded_body = cls.body_text(forwarded_message).strip()
+            forwarded_message_ids = cls.reply_target_message_ids(reference)
+            forward_references.append(
+                XmppForwardReference(
+                    message_id=forwarded_message_ids[0] if forwarded_message_ids else "",
+                    body=forwarded_body,
+                    sender=str(forwarded_message.attrib.get("from") or "").split("/", 1)[0],
+                    recipient=str(forwarded_message.attrib.get("to") or "").split("/", 1)[0],
+                    fake_outgoing=forwarded_message.find(TRANSPORT_FAKE_OUTGOING_TAG) is not None,
+                )
+            )
+        if not forward_references:
+            return body, ()
+        comment_body = cls.strip_escaped_ranges(body, fallback_ranges).strip()
+        return comment_body, tuple(forward_references)
+
+    @classmethod
+    def is_forward_reference(cls, msg, reference: ET.Element) -> bool:
+        forwarded_message = cls.forwarded_message(reference)
+        if forwarded_message is None:
+            return False
+        outer_to = cls.stanza_bare_jid(msg, "to")
+        if not outer_to:
+            return False
+        inner_from = str(forwarded_message.attrib.get("from") or "").split("/", 1)[0]
+        inner_to = str(forwarded_message.attrib.get("to") or "").split("/", 1)[0]
+        return outer_to not in {inner_from, inner_to}
+
+    @staticmethod
+    def stanza_bare_jid(msg, key: str) -> str:
+        value = msg[key]
+        bare = getattr(value, "bare", value)
+        return str(bare or "").split("/", 1)[0]
+
+    @classmethod
+    def reference_body_range(cls, reference: ET.Element) -> Optional[tuple]:
+        begin = cls.nonnegative_int(reference.attrib.get("begin"))
+        end = cls.nonnegative_int(reference.attrib.get("end"))
+        if begin is None or end is None or end < begin:
+            return None
+        return begin, end
+
+    @classmethod
+    def strip_escaped_ranges(cls, body: str, ranges: list) -> str:
+        if not body or not ranges:
+            return body
+        result = []
+        escaped_offset = 0
+        range_index = 0
+        sorted_ranges = sorted(ranges)
+        for character in body:
+            escaped_character = cls.xml_escaped_text(character)
+            next_offset = escaped_offset + cls.utf16_len(escaped_character)
+            while range_index < len(sorted_ranges) and escaped_offset >= sorted_ranges[range_index][1]:
+                range_index += 1
+            in_range = (
+                range_index < len(sorted_ranges)
+                and escaped_offset >= sorted_ranges[range_index][0]
+                and next_offset <= sorted_ranges[range_index][1]
+            )
+            if not in_range:
+                result.append(character)
+            escaped_offset = next_offset
+        return "".join(result)
+
+    @staticmethod
+    def nonnegative_int(value: object) -> Optional[int]:
+        if value is None:
+            return None
+        try:
+            parsed = int(str(value).strip())
+        except ValueError:
+            return None
+        return parsed if parsed >= 0 else None
 
     @staticmethod
     def reply_target_message_ids(reference: ET.Element) -> tuple:
@@ -126,6 +218,16 @@ class XmppMessageXml:
             if child.tag == "{jabber:client}message" or child.tag.rsplit("}", 1)[-1] == "message":
                 return child
         return None
+
+    @staticmethod
+    def body_text(message: ET.Element) -> str:
+        body = message.find("{jabber:client}body")
+        if body is None:
+            for child in message:
+                if child.tag.rsplit("}", 1)[-1] == "body":
+                    body = child
+                    break
+        return body.text or "" if body is not None else ""
 
     @staticmethod
     def message_candidate_ids(msg) -> tuple:
@@ -173,6 +275,65 @@ class XmppMessageXml:
         body = ET.SubElement(message, "{jabber:client}body")
         body.text = reply_reference.body
         return reference
+
+    @classmethod
+    def body_with_forward_references(cls, body: str, forward_references: tuple) -> tuple:
+        references = []
+        if not forward_references:
+            return body, references
+        result = ""
+        for forward_reference in forward_references:
+            fallback = cls.forward_fallback_text(forward_reference)
+            begin = cls.escaped_text_len(result)
+            result += fallback
+            end = cls.escaped_text_len(result)
+            references.append(cls.forward_reference_element(forward_reference, begin=begin, end=end))
+        if body:
+            result += body
+        return result, references
+
+    @classmethod
+    def forward_reference_element(
+        cls,
+        forward_reference: XmppForwardReference,
+        *,
+        begin: int,
+        end: int,
+    ) -> ET.Element:
+        reference = ET.Element(
+            "{%s}reference" % XABBER_REFERENCES_NS,
+            {
+                "type": "mutable",
+                "begin": str(begin),
+                "end": str(end),
+            },
+        )
+        forwarded = ET.SubElement(reference, "{%s}forwarded" % FORWARDED_NS)
+        message = ET.SubElement(
+            forwarded,
+            "{jabber:client}message",
+            {
+                "from": forward_reference.sender,
+                "to": forward_reference.recipient,
+                "type": "chat",
+            },
+        )
+        if forward_reference.message_id:
+            message.attrib["id"] = forward_reference.message_id
+        ET.SubElement(message, "{%s}markable" % CHAT_MARKERS_NS)
+        if forward_reference.message_id:
+            ET.SubElement(message, "{%s}origin-id" % SID_NS, {"id": forward_reference.message_id})
+        if forward_reference.fake_outgoing:
+            ET.SubElement(message, TRANSPORT_FAKE_OUTGOING_TAG)
+        body = ET.SubElement(message, "{jabber:client}body")
+        body.text = forward_reference.body
+        return reference
+
+    @staticmethod
+    def forward_fallback_text(forward_reference: XmppForwardReference) -> str:
+        quoted_lines = forward_reference.body.splitlines() or [forward_reference.body]
+        quoted_text = "\n".join("> %s" % line if line else ">" for line in quoted_lines)
+        return "> %s:\n%s\n" % (forward_reference.sender, quoted_text)
 
     @staticmethod
     def reply_fallback_prefix(reply_reference: XmppReplyReference) -> str:
