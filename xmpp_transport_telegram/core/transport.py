@@ -61,7 +61,11 @@ class TelegramTransport:
         group_route = self._bot_group_fanout_route(xmpp_jid, contact_jid, group_sender_jid)
         if group_route is not None:
             owner_jid, chat_id = group_route
-            await self._send_xabber_group_message_to_telegram(owner_jid, chat_id, body)
+            await self._send_xabber_group_message_to_telegram(
+                owner_jid,
+                chat_id,
+                self._strip_xabber_group_sender_prefix(body, group_sender_jid),
+            )
             return
         if contact_jid == self.xmpp.client.bot_jid and group_sender_jid is not None:
             return
@@ -175,6 +179,8 @@ class TelegramTransport:
             owner_jid=owner_jid,
             group_jid=group_jid,
             member_jid=owner_jid,
+            nickname=owner_jid.split("@", 1)[0],
+            auto_join=False,
         )
         if not invited:
             return
@@ -190,6 +196,8 @@ class TelegramTransport:
         owner_jid: str,
         group_jid: str,
         member_jid: str,
+        nickname: str,
+        auto_join: bool,
     ) -> bool:
         if member_jid == self._group_transport_member_jid():
             return False
@@ -213,6 +221,12 @@ class TelegramTransport:
                     group_jid,
                     member_jid,
                 )
+                if auto_join:
+                    self.xmpp.client.join_xabber_group(
+                        member_jid=member_jid,
+                        group_jid=group_jid,
+                        nickname=nickname,
+                    )
                 self._group_protocol_members.add(member_key)
                 return True
             log.debug(
@@ -223,6 +237,12 @@ class TelegramTransport:
                 exc,
             )
             return False
+        if auto_join:
+            self.xmpp.client.join_xabber_group(
+                member_jid=member_jid,
+                group_jid=group_jid,
+                nickname=nickname,
+            )
         self._group_protocol_members.add(member_key)
         return True
 
@@ -432,18 +452,24 @@ class TelegramTransport:
         await self._ensure_telegram_group_chat(xmpp_jid, chat)
         if getattr(event, "out", False):
             sender = self._group_transport_member_jid()
+            sender_name = self._group_sender_nickname(sender)
         else:
             sender_id = getattr(event, "sender_id", None)
             if sender_id is not None:
                 sender = self._telegram_user_jid(int(sender_id))
             else:
                 sender = self._group_transport_member_jid()
+            sender_name = await self._telegram_group_sender_name(event, sender)
         group_jid = self._group_jid(str(peer_id), xmpp_jid)
         await self._ensure_group_protocol_member(
             owner_jid=xmpp_jid,
             group_jid=group_jid,
             member_jid=sender,
+            nickname=sender_name,
+            auto_join=sender.endswith("@%s" % self.settings.xmpp_component_jid),
         )
+        if not getattr(event, "out", False):
+            body = self._format_group_body(sender_name, body)
         message_id = self._incoming_telegram_message_id(event)
         log.debug(
             "Delivering incoming Telegram group message to Xabber xmpp_jid=%s group_jid=%s sender=%s body_length=%s",
@@ -567,6 +593,69 @@ class TelegramTransport:
 
     def _telegram_user_jid(self, user_id: int) -> str:
         return "chat-%s@%s" % (user_id, self.settings.xmpp_component_jid)
+
+    @staticmethod
+    def _group_sender_nickname(sender_jid: str) -> str:
+        localpart = sender_jid.split("@", 1)[0]
+        if localpart.startswith("chat-"):
+            return "Telegram user %s" % localpart.removeprefix("chat-")
+        return sender_jid.split("@", 1)[0]
+
+    async def _telegram_group_sender_name(self, event, sender_jid: str) -> str:
+        get_sender = getattr(event, "get_sender", None)
+        if get_sender is not None:
+            try:
+                sender = await get_sender()
+            except Exception:
+                log.debug("Failed to load Telegram group sender name", exc_info=True)
+            else:
+                title = self._telegram_entity_title(sender)
+                if title:
+                    return title
+        return self._group_sender_nickname(sender_jid)
+
+    @staticmethod
+    def _telegram_entity_title(entity) -> Optional[str]:
+        if entity is None:
+            return None
+        title = getattr(entity, "title", None)
+        if title:
+            return str(title)
+        first_name = str(getattr(entity, "first_name", "") or "").strip()
+        last_name = str(getattr(entity, "last_name", "") or "").strip()
+        full_name = " ".join(part for part in (first_name, last_name) if part)
+        if full_name:
+            return full_name
+        username = getattr(entity, "username", None)
+        if username:
+            return str(username)
+        return None
+
+    @staticmethod
+    def _format_group_body(sender_name: str, body: str) -> str:
+        return "%s:\n%s" % (sender_name, body)
+
+    @staticmethod
+    def _strip_xabber_group_sender_prefix(body: str, sender_jid: Optional[str]) -> str:
+        if not sender_jid:
+            return body
+        prefixes = [
+            "%s:\n" % sender_jid,
+            "%s:\r\n" % sender_jid,
+            "%s: " % sender_jid,
+        ]
+        bare_name = sender_jid.split("@", 1)[0]
+        prefixes.extend(
+            [
+                "%s:\n" % bare_name,
+                "%s:\r\n" % bare_name,
+                "%s: " % bare_name,
+            ]
+        )
+        for prefix in prefixes:
+            if body.startswith(prefix):
+                return body[len(prefix):]
+        return body
 
     def _peer_id_from_contact_jid(self, contact_jid: str) -> int:
         prefix = "chat-"

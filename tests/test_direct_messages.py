@@ -107,6 +107,7 @@ class FakeXmppClient:
         self.updated_groups = []
         self.invites = []
         self.direct_invites = []
+        self.group_joins = []
         self.bot_jid = "bot@telegram.example.com"
         self.invite_error = None
 
@@ -130,6 +131,9 @@ class FakeXmppClient:
 
     def send_xabber_group_invite(self, **kwargs):
         self.direct_invites.append(kwargs)
+
+    def join_xabber_group(self, **kwargs):
+        self.group_joins.append(kwargs)
 
     def parse_component_localpart(self, jid):
         suffix = "@telegram.example.com"
@@ -161,6 +165,10 @@ class FakeEvent:
         sender_id=None,
         message_id=900,
         title=None,
+        sender_title=None,
+        sender_first_name=None,
+        sender_last_name=None,
+        sender_username=None,
     ):
         self.chat_id = chat_id
         self.raw_text = raw_text
@@ -171,9 +179,25 @@ class FakeEvent:
         self.sender_id = sender_id
         self.id = message_id
         self.title = title
+        self.sender_title = sender_title
+        self.sender_first_name = sender_first_name
+        self.sender_last_name = sender_last_name
+        self.sender_username = sender_username
 
     async def get_chat(self):
         return type("FakeChatEntity", (), {"title": self.title})()
+
+    async def get_sender(self):
+        return type(
+            "FakeSenderEntity",
+            (),
+            {
+                "title": self.sender_title,
+                "first_name": self.sender_first_name,
+                "last_name": self.sender_last_name,
+                "username": self.sender_username,
+            },
+        )()
 
 
 class FakeSession:
@@ -309,6 +333,8 @@ async def _test_incoming_telegram_group_message_sends_to_xabber_group():
             sender_id=200,
             message_id=901,
             title="Telegram Team",
+            sender_first_name="Alice",
+            sender_last_name="Smith",
         ),
     )
 
@@ -339,11 +365,18 @@ async def _test_incoming_telegram_group_message_sends_to_xabber_group():
         "group_jid": group_jid,
         "reason": "Telegram group member",
     }
+    assert transport.xmpp.client.group_joins == [
+        {
+            "member_jid": "chat-200@telegram.example.com",
+            "group_jid": group_jid,
+            "nickname": "Alice Smith",
+        }
+    ]
     assert transport.xmpp.client.group_messages == [
         {
             "sender": "chat-200@telegram.example.com",
             "group_jid": group_jid,
-            "body": "hello group",
+            "body": "Alice Smith:\nhello group",
             "message_id": "901",
             "fake_outgoing": True,
         }
@@ -466,7 +499,14 @@ async def _test_incoming_telegram_group_message_does_not_create_existing_xabber_
         }
     ]
     assert transport.xmpp.client.direct_invites[0]["to_jid"] == "user@example.com"
-    assert transport.xmpp.client.group_messages[0]["body"] == "hello existing group"
+    assert transport.xmpp.client.group_joins == [
+        {
+            "member_jid": "chat-200@telegram.example.com",
+            "group_jid": group_jid,
+            "nickname": "Telegram user 200",
+        }
+    ]
+    assert transport.xmpp.client.group_messages[0]["body"] == "Telegram user 200:\nhello existing group"
 
 
 def test_existing_xabber_group_already_invited_owner_still_sends_direct_invite():
@@ -507,6 +547,50 @@ async def _test_existing_xabber_group_already_invited_owner_still_sends_direct_i
     assert transport.xmpp.client.group_messages[0]["body"] == "public post"
 
 
+def test_already_invited_telegram_group_sender_is_auto_joined_before_message():
+    asyncio.run(_test_already_invited_telegram_group_sender_is_auto_joined_before_message())
+
+
+async def _test_already_invited_telegram_group_sender_is_auto_joined_before_message():
+    repository = FakeRepository()
+    group_jid = "telegramg-75736572406578616d706c652e636f6d--5386493808@example.com"
+    repository.signatures[("user@example.com", group_jid)] = "Test\nTrue\nFalse"
+    transport = TelegramTransport(_settings(), repository)
+    transport.xmpp = FakeXmpp()
+    transport._group_protocol_members.add(("user@example.com", group_jid, "user@example.com"))
+    transport.xmpp.client.invite_error = FakeIqError(_already_invited_error_xml())
+
+    await transport._handle_incoming_telegram_message(
+        "user@example.com",
+        FakeEvent(
+            chat_id=-5386493808,
+            raw_text="test123",
+            is_private=False,
+            sender_id=356739513,
+            message_id=178887,
+            title="Test",
+            sender_username="member_name",
+        ),
+    )
+
+    assert transport.xmpp.client.group_joins == [
+        {
+            "member_jid": "chat-356739513@telegram.example.com",
+            "group_jid": group_jid,
+            "nickname": "member_name",
+        }
+    ]
+    assert transport.xmpp.client.group_messages == [
+        {
+            "sender": "chat-356739513@telegram.example.com",
+            "group_jid": group_jid,
+            "body": "member_name:\ntest123",
+            "message_id": "178887",
+            "fake_outgoing": True,
+        }
+    ]
+
+
 def test_xabber_group_fanout_sends_to_telegram_group():
     asyncio.run(_test_xabber_group_fanout_sends_to_telegram_group())
 
@@ -529,7 +613,7 @@ async def _test_xabber_group_fanout_sends_to_telegram_group():
     await transport.send_direct_message(
         group_jid,
         "bot@telegram.example.com",
-        "hello telegram group",
+        "user@example.com:\nhello telegram group",
         group_sender_jid="user@example.com",
     )
 
