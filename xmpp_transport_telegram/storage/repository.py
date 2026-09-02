@@ -64,6 +64,35 @@ class Repository:
 
                 CREATE INDEX IF NOT EXISTS idx_synced_roster_items_xmpp_jid
                 ON synced_roster_items (xmpp_jid);
+
+                CREATE TABLE IF NOT EXISTS telegram_avatar_files (
+                    content_hash TEXT PRIMARY KEY,
+                    relative_path TEXT NOT NULL,
+                    mime_type TEXT NOT NULL,
+                    bytes_count INTEGER NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    accessed_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                );
+
+                CREATE TABLE IF NOT EXISTS telegram_contact_avatars (
+                    id BIGSERIAL PRIMARY KEY,
+                    owner_jid TEXT NOT NULL,
+                    contact_jid TEXT NOT NULL,
+                    peer_id BIGINT NOT NULL,
+                    photo_id TEXT NOT NULL,
+                    variant TEXT NOT NULL,
+                    content_hash TEXT NOT NULL REFERENCES telegram_avatar_files(content_hash),
+                    avatar_id TEXT NOT NULL,
+                    url TEXT NOT NULL,
+                    mime_type TEXT NOT NULL,
+                    bytes_count INTEGER NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    UNIQUE (owner_jid, contact_jid, variant)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_telegram_contact_avatars_hash
+                ON telegram_contact_avatars (content_hash);
                 """
             )
 
@@ -147,6 +176,13 @@ class Repository:
                         """,
                         previous_owner,
                     )
+                    await connection.execute(
+                        """
+                        DELETE FROM telegram_contact_avatars
+                        WHERE owner_jid = $1
+                        """,
+                        previous_owner,
+                    )
 
                 # A personal Telegram account can belong to only one XMPP user
                 # at a time.  The transaction first removes any previous owner,
@@ -183,10 +219,27 @@ class Repository:
         if self.pool is None:
             raise RuntimeError("Repository is not connected")
         async with self.pool.acquire() as connection:
-            await connection.execute(
-                "DELETE FROM telegram_sessions WHERE xmpp_account_id = $1",
-                xmpp_account_id,
-            )
+            async with connection.transaction():
+                owner_jid = await connection.fetchval(
+                    """
+                    SELECT xmpp_jid
+                    FROM xmpp_accounts
+                    WHERE id = $1
+                    """,
+                    xmpp_account_id,
+                )
+                await connection.execute(
+                    "DELETE FROM telegram_sessions WHERE xmpp_account_id = $1",
+                    xmpp_account_id,
+                )
+                if owner_jid is not None:
+                    await connection.execute(
+                        """
+                        DELETE FROM telegram_contact_avatars
+                        WHERE owner_jid = $1
+                        """,
+                        owner_jid,
+                    )
 
     async def list_connected_telegram_sessions(self):
         if self.pool is None:
@@ -256,4 +309,83 @@ class Repository:
                 """,
                 xmpp_jid,
                 item_jid,
+            )
+
+    async def upsert_avatar_file(
+        self,
+        content_hash: str,
+        relative_path: str,
+        mime_type: str,
+        bytes_count: int,
+    ) -> None:
+        if self.pool is None:
+            raise RuntimeError("Repository is not connected")
+        async with self.pool.acquire() as connection:
+            await connection.execute(
+                """
+                INSERT INTO telegram_avatar_files (
+                    content_hash, relative_path, mime_type, bytes_count
+                )
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (content_hash) DO UPDATE SET
+                    accessed_at = now()
+                """,
+                content_hash,
+                relative_path,
+                mime_type,
+                bytes_count,
+            )
+
+    async def upsert_contact_avatar(
+        self,
+        owner_jid: str,
+        contact_jid: str,
+        peer_id: int,
+        photo_id: str,
+        variant: str,
+        content_hash: str,
+        avatar_id: str,
+        url: str,
+        mime_type: str,
+        bytes_count: int,
+    ) -> None:
+        if self.pool is None:
+            raise RuntimeError("Repository is not connected")
+        async with self.pool.acquire() as connection:
+            await connection.execute(
+                """
+                INSERT INTO telegram_contact_avatars (
+                    owner_jid,
+                    contact_jid,
+                    peer_id,
+                    photo_id,
+                    variant,
+                    content_hash,
+                    avatar_id,
+                    url,
+                    mime_type,
+                    bytes_count,
+                    updated_at
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
+                ON CONFLICT (owner_jid, contact_jid, variant) DO UPDATE SET
+                    peer_id = EXCLUDED.peer_id,
+                    photo_id = EXCLUDED.photo_id,
+                    content_hash = EXCLUDED.content_hash,
+                    avatar_id = EXCLUDED.avatar_id,
+                    url = EXCLUDED.url,
+                    mime_type = EXCLUDED.mime_type,
+                    bytes_count = EXCLUDED.bytes_count,
+                    updated_at = now()
+                """,
+                owner_jid,
+                contact_jid,
+                peer_id,
+                photo_id,
+                variant,
+                content_hash,
+                avatar_id,
+                url,
+                mime_type,
+                bytes_count,
             )

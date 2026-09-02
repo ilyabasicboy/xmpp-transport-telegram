@@ -40,6 +40,8 @@ class Settings:
     health_port: int
     qr_storage_dir: str
     qr_base_url: str
+    avatar_storage_dir: str
+    avatar_base_url: str
     log_level: str
     log_file: str
     log_max_bytes: int
@@ -86,6 +88,8 @@ def load_settings(config_path: str = DEFAULT_CONFIG_PATH) -> Settings:
         health_port=health_port,
         qr_storage_dir=config.get("server", "qr_storage_dir", fallback="data/login_qr"),
         qr_base_url=qr_base_url.rstrip("/"),
+        avatar_storage_dir=config.get("server", "avatar_storage_dir", fallback="data/avatars"),
+        avatar_base_url=config.get("server", "avatar_base_url", fallback=qr_base_url).rstrip("/"),
         log_level=config.get("logging", "level", fallback="INFO"),
         log_file=config.get("logging", "file", fallback="logs/xmpp_transport_telegram.log"),
         log_max_bytes=config.getint("logging", "max_bytes", fallback=10485760),

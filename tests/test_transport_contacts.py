@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 from xml.etree import ElementTree as ET
 
 from cryptography.fernet import Fernet
@@ -6,7 +7,7 @@ from cryptography.fernet import Fernet
 from xmpp_transport_telegram.core.session_manager import SessionCipher
 from xmpp_transport_telegram.core.transport import TelegramTransport
 from xmpp_transport_telegram.runtime.config import Settings
-from xmpp_transport_telegram.telegram.models import TelegramContact, TelegramDialog
+from xmpp_transport_telegram.telegram.models import TelegramAvatar, TelegramContact, TelegramDialog
 from xmpp_transport_telegram.xmpp.component import XmppComponent
 
 
@@ -14,6 +15,8 @@ class FakeRepository:
     def __init__(self):
         self.signatures = {}
         self.connected_sessions = []
+        self.avatar_files = {}
+        self.contact_avatars = {}
 
     async def get_synced_roster_item_signature(self, xmpp_jid, item_jid):
         return self.signatures.get((xmpp_jid, item_jid))
@@ -29,6 +32,36 @@ class FakeRepository:
 
     async def list_connected_telegram_sessions(self):
         return self.connected_sessions
+
+    async def upsert_avatar_file(self, content_hash, relative_path, mime_type, bytes_count):
+        self.avatar_files[content_hash] = {
+            "relative_path": relative_path,
+            "mime_type": mime_type,
+            "bytes_count": bytes_count,
+        }
+
+    async def upsert_contact_avatar(
+        self,
+        owner_jid,
+        contact_jid,
+        peer_id,
+        photo_id,
+        variant,
+        content_hash,
+        avatar_id,
+        url,
+        mime_type,
+        bytes_count,
+    ):
+        self.contact_avatars[(owner_jid, contact_jid, variant)] = {
+            "peer_id": peer_id,
+            "photo_id": photo_id,
+            "content_hash": content_hash,
+            "avatar_id": avatar_id,
+            "url": url,
+            "mime_type": mime_type,
+            "bytes_count": bytes_count,
+        }
 
 
 class FakeSession:
@@ -86,6 +119,7 @@ class FakeXmppClient:
         self.updated_groups = []
         self.invites = []
         self.direct_invites = []
+        self.avatar_events = []
 
     async def send_transport_operation(self, operation, fields, groups=(), timeout=10):
         self.operations.append((operation, fields, groups))
@@ -103,6 +137,9 @@ class FakeXmppClient:
 
     def send_xabber_group_invite(self, **kwargs):
         self.direct_invites.append(kwargs)
+
+    def send_avatar_metadata_event(self, **kwargs):
+        self.avatar_events.append(kwargs)
 
 
 class FakeXmpp:
@@ -135,6 +172,53 @@ async def _test_ensure_telegram_contact_pushes_contact_into_telegram_circle():
             ("Telegram",),
         )
     ]
+
+
+def test_ensure_telegram_contact_caches_avatar_by_content_hash(tmp_path):
+    asyncio.run(_test_ensure_telegram_contact_caches_avatar_by_content_hash(tmp_path))
+
+
+async def _test_ensure_telegram_contact_caches_avatar_by_content_hash(tmp_path):
+    settings = _settings()
+    settings = Settings(
+        **{
+            **settings.__dict__,
+            "avatar_storage_dir": str(tmp_path / "avatars"),
+            "avatar_base_url": "http://transport.example",
+        }
+    )
+    repository = FakeRepository()
+    transport = TelegramTransport(settings, repository)
+    transport.xmpp = FakeXmpp()
+    content = b"same-avatar"
+    content_hash = hashlib.sha256(content).hexdigest()
+
+    await transport._ensure_telegram_contact(
+        "first@example.com",
+        TelegramContact(
+            peer_id=100,
+            title="Alice",
+            avatar=TelegramAvatar(photo_id="111", content=content),
+        ),
+    )
+    await transport._ensure_telegram_contact(
+        "second@example.com",
+        TelegramContact(
+            peer_id=200,
+            title="Alice Copy",
+            avatar=TelegramAvatar(photo_id="222", content=content),
+        ),
+    )
+
+    assert (tmp_path / "avatars" / ("%s.jpg" % content_hash)).read_bytes() == content
+    assert list(repository.avatar_files) == [content_hash]
+    assert repository.contact_avatars[
+        ("first@example.com", "chat-100@telegram.example.com", "small")
+    ]["content_hash"] == content_hash
+    assert repository.contact_avatars[
+        ("second@example.com", "chat-200@telegram.example.com", "small")
+    ]["content_hash"] == content_hash
+    assert transport.xmpp.client.avatar_events[0]["url"] == "http://transport.example/avatar/%s.jpg" % content_hash
 
 
 def test_restart_sync_pushes_contacts_for_connected_sessions():
@@ -282,6 +366,8 @@ def _settings():
         health_port=8089,
         qr_storage_dir="data/login_qr",
         qr_base_url="http://127.0.0.1:8089",
+        avatar_storage_dir="data/avatars",
+        avatar_base_url="http://127.0.0.1:8089",
         log_level="INFO",
         log_file="",
         log_max_bytes=10485760,

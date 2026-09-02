@@ -6,7 +6,12 @@ from telethon.sessions import StringSession
 from telethon.tl.functions.contacts import GetContactsRequest
 
 from xmpp_transport_telegram.runtime.config import Settings
-from xmpp_transport_telegram.telegram.models import TelegramContact, TelegramDialog, TelegramForwardReference
+from xmpp_transport_telegram.telegram.models import (
+    TelegramAvatar,
+    TelegramContact,
+    TelegramDialog,
+    TelegramForwardReference,
+)
 
 
 log = logging.getLogger(__name__)
@@ -51,6 +56,7 @@ class TelegramBackend:
                 title=self._user_title(user),
                 username=getattr(user, "username", None),
                 phone=getattr(user, "phone", None),
+                avatar=await self._small_user_avatar(client, user),
             )
 
         async for dialog in client.iter_dialogs():
@@ -66,6 +72,7 @@ class TelegramBackend:
                 title=title,
                 username=getattr(entity, "username", None),
                 phone=getattr(entity, "phone", None),
+                avatar=await self._small_user_avatar(client, entity),
             )
         return sorted(contacts_by_peer_id.values(), key=lambda contact: contact.title.lower())
 
@@ -215,3 +222,22 @@ class TelegramBackend:
         if phone:
             return "+%s" % phone
         return str(getattr(user, "id", "unknown"))
+
+    async def _small_user_avatar(self, client: TelegramClient, user) -> Optional[TelegramAvatar]:
+        photo = getattr(user, "photo", None)
+        photo_id = getattr(photo, "photo_id", None)
+        if photo_id is None:
+            return None
+        try:
+            content = await client.download_profile_photo(user, file=bytes, download_big=False)
+        except Exception:
+            log.debug(
+                "Could not download Telegram small avatar peer_id=%s photo_id=%s",
+                getattr(user, "id", "unknown"),
+                photo_id,
+                exc_info=True,
+            )
+            return None
+        if not content:
+            return None
+        return TelegramAvatar(photo_id=str(photo_id), content=content)

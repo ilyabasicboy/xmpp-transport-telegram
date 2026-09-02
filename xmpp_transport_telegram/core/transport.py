@@ -4,6 +4,7 @@ from typing import Dict, Optional
 
 from telethon import events
 
+from xmpp_transport_telegram.core.avatar_cache import AvatarCache
 from xmpp_transport_telegram.core.commands import CommandService
 from xmpp_transport_telegram.core.qr_store import QrCodeStore
 from xmpp_transport_telegram.core.session_manager import SessionCipher
@@ -26,6 +27,7 @@ class TelegramTransport:
         self.settings = settings
         self.repository = repository
         self.telegram = TelegramBackend(settings)
+        self.avatar_cache = AvatarCache(settings.avatar_storage_dir, settings.avatar_base_url)
         self.session_cipher = SessionCipher(settings.session_encryption_key)
         self.qr_store = QrCodeStore(settings.qr_storage_dir, "%s/qr" % settings.qr_base_url)
         self.commands = CommandService(
@@ -158,6 +160,23 @@ class TelegramTransport:
             },
             groups=(self.TELEGRAM_CONTACTS_CIRCLE,),
         )
+        if contact.avatar is not None:
+            cached_avatar = await self.avatar_cache.store(
+                self.repository,
+                owner_jid=xmpp_jid,
+                contact_jid=contact_jid,
+                peer_id=contact.peer_id,
+                avatar=contact.avatar,
+            )
+            if cached_avatar is not None:
+                self.xmpp.client.send_avatar_metadata_event(
+                    sender=contact_jid,
+                    recipient=xmpp_jid,
+                    avatar_id=cached_avatar.avatar_id,
+                    url=cached_avatar.url,
+                    mime_type=cached_avatar.mime_type,
+                    bytes_count=cached_avatar.bytes_count,
+                )
         await self.repository.set_synced_roster_item_signature(
             xmpp_jid,
             contact_jid,

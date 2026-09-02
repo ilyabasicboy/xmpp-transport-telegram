@@ -1245,6 +1245,8 @@ def _settings():
         health_port=8089,
         qr_storage_dir="data/login_qr",
         qr_base_url="http://127.0.0.1:8089",
+        avatar_storage_dir="data/avatars",
+        avatar_base_url="http://127.0.0.1:8089",
         log_level="INFO",
         log_file="",
         log_max_bytes=10485760,

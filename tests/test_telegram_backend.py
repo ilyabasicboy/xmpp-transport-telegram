@@ -8,13 +8,23 @@ from xmpp_transport_telegram.telegram.models import TelegramForwardReference
 
 
 class FakeEntity:
-    def __init__(self, user_id=None, first_name=None, last_name=None, username=None, phone=None, bot=False):
+    def __init__(
+        self,
+        user_id=None,
+        first_name=None,
+        last_name=None,
+        username=None,
+        phone=None,
+        bot=False,
+        photo=None,
+    ):
         self.id = user_id
         self.first_name = first_name
         self.last_name = last_name
         self.username = username
         self.phone = phone
         self.bot = bot
+        self.photo = photo
 
 
 class FakeDialog:
@@ -32,6 +42,7 @@ class FakeClient:
         self.users = users
         self.sent_messages = []
         self.forwarded_messages = []
+        self.profile_photo_downloads = []
 
     async def __call__(self, request):
         return type("FakeContactsResult", (), {"users": list(self.users)})()
@@ -47,6 +58,10 @@ class FakeClient:
     async def forward_messages(self, entity, message_id, from_peer=None):
         self.forwarded_messages.append((entity, message_id, from_peer))
         return type("FakeForwardedMessage", (), {"id": 888})()
+
+    async def download_profile_photo(self, entity, file=None, download_big=True):
+        self.profile_photo_downloads.append((entity, file, download_big))
+        return b"avatar"
 
 
 def test_list_contacts_merges_address_book_and_private_dialogs():
@@ -78,6 +93,24 @@ async def _test_list_contacts_merges_address_book_and_private_dialogs():
         (200, "Bot", "test_bot"),
         (500, "Charlie", "charlie"),
     ]
+
+
+def test_list_contacts_downloads_small_avatar_from_user_photo():
+    asyncio.run(_test_list_contacts_downloads_small_avatar_from_user_photo())
+
+
+async def _test_list_contacts_downloads_small_avatar_from_user_photo():
+    backend = TelegramBackend(_settings())
+    photo = type("FakePhoto", (), {"photo_id": 12345})()
+    user = FakeEntity(user_id=100, first_name="Alice", photo=photo)
+    client = FakeClient([], [user])
+
+    contacts = await backend.list_contacts(client)
+
+    assert contacts[0].avatar.photo_id == "12345"
+    assert contacts[0].avatar.content == b"avatar"
+    assert contacts[0].avatar.variant == "small"
+    assert client.profile_photo_downloads == [(user, bytes, False)]
 
 
 def test_send_direct_message_resolves_private_dialog_entity():
@@ -246,6 +279,8 @@ def _settings():
         health_port=8089,
         qr_storage_dir="data/login_qr",
         qr_base_url="http://127.0.0.1:8089",
+        avatar_storage_dir="data/avatars",
+        avatar_base_url="http://127.0.0.1:8089",
         log_level="INFO",
         log_file="",
         log_max_bytes=10485760,

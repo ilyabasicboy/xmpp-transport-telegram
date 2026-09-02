@@ -14,6 +14,8 @@ from xmpp_transport_telegram.xmpp.message_xml import XmppMessageXml
 from xmpp_transport_telegram.xmpp.models import XmppIncomingMessage, XmppReplyReference
 from xmpp_transport_telegram.xmpp.namespaces import (
     GROUPS_NS,
+    PUBSUB_AVATAR_METADATA_NS,
+    PUBSUB_EVENT_NS,
     TRANSPORT_FAKE_OUTGOING_TAG,
     TRANSPORT_TELEGRAM_NS,
 )
@@ -187,6 +189,34 @@ class TelegramCommandComponent(ComponentXMPP):
             message.xml.append(XmppMessageXml.reply_reference_element(reply_reference))
         for reference in forward_reference_elements:
             message.xml.append(reference)
+        message.send()
+
+    def send_avatar_metadata_event(
+        self,
+        sender: str,
+        recipient: str,
+        *,
+        avatar_id: str,
+        url: str,
+        mime_type: str,
+        bytes_count: int = 0,
+    ) -> None:
+        message = self.make_message(mfrom=sender, mto=recipient, mtype="headline")
+        event = ET.Element("{%s}event" % PUBSUB_EVENT_NS)
+        items = ET.SubElement(event, "{%s}items" % PUBSUB_EVENT_NS, {"node": PUBSUB_AVATAR_METADATA_NS})
+        item = ET.SubElement(items, "{%s}item" % PUBSUB_EVENT_NS, {"id": avatar_id})
+        metadata = ET.SubElement(item, "{%s}metadata" % PUBSUB_AVATAR_METADATA_NS)
+        ET.SubElement(
+            metadata,
+            "info",
+            {
+                "bytes": str(max(bytes_count, 0)),
+                "id": avatar_id,
+                "type": mime_type,
+                "url": url,
+            },
+        )
+        message.xml.append(event)
         message.send()
 
     def send_xabber_group_message(

@@ -3,6 +3,14 @@ from typing import Optional
 
 
 @dataclass(frozen=True)
+class TelegramAvatar:
+    photo_id: str
+    content: bytes
+    mime_type: str = "image/jpeg"
+    variant: str = "small"
+
+
+@dataclass(frozen=True)
 class TelegramDialog:
     peer_id: int
     title: str
@@ -18,6 +26,7 @@ class TelegramContact:
     title: str
     username: Optional[str] = None
     phone: Optional[str] = None
+    avatar: Optional[TelegramAvatar] = None
 
 
 @dataclass(frozen=True)

@@ -31,6 +31,9 @@ health_port = 8089
 qr_storage_dir = data/login_qr
 # Public base URL for this transport HTTP listener. /qr/<file>.svg is appended.
 qr_base_url = http://127.0.0.1:8089
+avatar_storage_dir = data/avatars
+# Public base URL for this transport HTTP listener. /avatar/<hash>.jpg is appended.
+avatar_base_url = http://127.0.0.1:8089
 
 [logging]
 level = INFO

@@ -437,6 +437,8 @@ class CommandService:
                 contact.title,
                 contact.username or "",
                 contact.phone or "",
+                contact.avatar.photo_id if contact.avatar is not None else "",
+                contact.avatar.variant if contact.avatar is not None else "",
             ]
         )
         # The signature is just a cheap idempotency key for roster sync, not a
