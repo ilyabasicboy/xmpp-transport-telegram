@@ -33,6 +33,8 @@ def configure_logging(level: str, log_file: str, max_bytes: int, backup_count: i
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
         handlers=handlers,
     )
+    for noisy_logger in ("telethon", "slixmpp", "aiohttp.access"):
+        logging.getLogger(noisy_logger).setLevel(logging.WARNING)
 
 
 async def run(config_path: str) -> None:

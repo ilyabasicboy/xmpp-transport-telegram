@@ -5,6 +5,7 @@ from cryptography.fernet import Fernet
 from xmpp_transport_telegram.runtime.config import Settings
 from xmpp_transport_telegram.telegram.backend import TelegramBackend
 from xmpp_transport_telegram.telegram.models import TelegramForwardReference
+from xmpp_transport_telegram.xmpp.models import XmppOutgoingMedia
 
 
 class FakeEntity:
@@ -41,6 +42,7 @@ class FakeClient:
         self.dialogs = dialogs
         self.users = users
         self.sent_messages = []
+        self.sent_files = []
         self.forwarded_messages = []
         self.profile_photo_downloads = []
         self.fail_profile_photo_download = False
@@ -55,6 +57,10 @@ class FakeClient:
     async def send_message(self, entity, body, reply_to=None):
         self.sent_messages.append((entity, body, reply_to))
         return type("FakeSentMessage", (), {"id": 777})()
+
+    async def send_file(self, entity, file, caption=None, reply_to=None):
+        self.sent_files.append((entity, file, caption, reply_to))
+        return type("FakeSentFileMessage", (), {"id": 778})()
 
     async def forward_messages(self, entity, message_id, from_peer=None):
         self.forwarded_messages.append((entity, message_id, from_peer))
@@ -133,6 +139,24 @@ async def _test_list_contacts_marks_avatar_download_failure():
     assert contacts[0].avatar_download_failed
 
 
+def test_list_contacts_can_skip_avatar_downloads():
+    asyncio.run(_test_list_contacts_can_skip_avatar_downloads())
+
+
+async def _test_list_contacts_can_skip_avatar_downloads():
+    backend = TelegramBackend(_settings())
+    photo = type("FakePhoto", (), {"photo_id": 12345})()
+    user = FakeEntity(user_id=100, first_name="Alice", photo=photo)
+    client = FakeClient([], [user])
+
+    contacts = await backend.list_contacts(client, include_avatars=False)
+
+    assert contacts[0].avatar is None
+    assert contacts[0].avatar_photo_id == "12345"
+    assert not contacts[0].avatar_download_failed
+    assert client.profile_photo_downloads == []
+
+
 def test_send_direct_message_resolves_private_dialog_entity():
     asyncio.run(_test_send_direct_message_resolves_private_dialog_entity())
 
@@ -166,6 +190,10 @@ def test_send_direct_message_passes_reply_to_telegram():
     asyncio.run(_test_send_direct_message_passes_reply_to_telegram())
 
 
+def test_send_direct_message_sends_media_url_with_caption():
+    asyncio.run(_test_send_direct_message_sends_media_url_with_caption())
+
+
 def test_send_direct_message_forwards_from_source_peer():
     asyncio.run(_test_send_direct_message_forwards_from_source_peer())
 
@@ -179,6 +207,24 @@ async def _test_send_direct_message_passes_reply_to_telegram():
 
     assert message_id == "777"
     assert client.sent_messages == [(bot_entity, "hello bot", 123)]
+
+
+async def _test_send_direct_message_sends_media_url_with_caption():
+    backend = TelegramBackend(_settings())
+    bot_entity = FakeEntity(user_id=200, username="test_bot", bot=True)
+    client = FakeClient([FakeDialog(200, "Bot", bot_entity)])
+
+    message_id = await backend.send_direct_message(
+        client,
+        200,
+        "caption",
+        reply_to_message_id="123",
+        media=(XmppOutgoingMedia(url="https://xabber.example/gallery/photo.jpg", mime_type="image/jpeg"),),
+    )
+
+    assert message_id == "778"
+    assert client.sent_files == [(bot_entity, "https://xabber.example/gallery/photo.jpg", "caption", 123)]
+    assert client.sent_messages == []
 
 
 async def _test_send_direct_message_forwards_from_source_peer():

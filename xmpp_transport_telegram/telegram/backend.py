@@ -26,6 +26,7 @@ class TelegramBackend:
             StringSession(session_data or ""),
             self.settings.telegram_api_id,
             self.settings.telegram_api_hash,
+            catch_up=False,
         )
 
     async def list_dialogs(self, client: TelegramClient, limit: int = 100) -> List[TelegramDialog]:
@@ -46,18 +47,23 @@ class TelegramBackend:
             )
         return dialogs
 
-    async def list_contacts(self, client: TelegramClient) -> List[TelegramContact]:
+    async def list_contacts(self, client: TelegramClient, include_avatars: bool = True) -> List[TelegramContact]:
         contacts_by_peer_id = {}
         result = await client(GetContactsRequest(hash=0))
         for user in getattr(result, "users", []):
             peer_id = int(user.id)
-            avatar, avatar_download_failed = await self._small_user_avatar(client, user)
+            avatar, avatar_photo_id, avatar_download_failed = await self._small_user_avatar(
+                client,
+                user,
+                include_content=include_avatars,
+            )
             contacts_by_peer_id[peer_id] = TelegramContact(
                 peer_id=peer_id,
                 title=self._user_title(user),
                 username=getattr(user, "username", None),
                 phone=getattr(user, "phone", None),
                 avatar=avatar,
+                avatar_photo_id=avatar_photo_id,
                 avatar_download_failed=avatar_download_failed,
             )
 
@@ -69,13 +75,18 @@ class TelegramBackend:
             if peer_id in contacts_by_peer_id:
                 continue
             title = dialog.name or self._user_title(entity)
-            avatar, avatar_download_failed = await self._small_user_avatar(client, entity)
+            avatar, avatar_photo_id, avatar_download_failed = await self._small_user_avatar(
+                client,
+                entity,
+                include_content=include_avatars,
+            )
             contacts_by_peer_id[peer_id] = TelegramContact(
                 peer_id=peer_id,
                 title=title,
                 username=getattr(entity, "username", None),
                 phone=getattr(entity, "phone", None),
                 avatar=avatar,
+                avatar_photo_id=avatar_photo_id,
                 avatar_download_failed=avatar_download_failed,
             )
         return sorted(contacts_by_peer_id.values(), key=lambda contact: contact.title.lower())
@@ -105,8 +116,17 @@ class TelegramBackend:
         body: str,
         reply_to_message_id: Optional[str] = None,
         forward_reference: Optional[TelegramForwardReference] = None,
+        media: tuple = (),
     ) -> Optional[str]:
         entity = await self._resolve_direct_entity(client, peer_id)
+        if media:
+            return await self._send_media_message(
+                client,
+                entity,
+                body,
+                media,
+                reply_to_message_id=reply_to_message_id,
+            )
         if forward_reference is not None:
             sent = await self._forward_message(client, entity, forward_reference)
             if body:
@@ -134,8 +154,17 @@ class TelegramBackend:
         body: str,
         reply_to_message_id: Optional[str] = None,
         forward_reference: Optional[TelegramForwardReference] = None,
+        media: tuple = (),
     ) -> Optional[str]:
         entity = await self._resolve_group_entity(client, peer_id)
+        if media:
+            return await self._send_media_message(
+                client,
+                entity,
+                body,
+                media,
+                reply_to_message_id=reply_to_message_id,
+            )
         if forward_reference is not None:
             sent = await self._forward_message(client, entity, forward_reference)
             if body:
@@ -207,6 +236,36 @@ class TelegramBackend:
         message_id = getattr(sent, "id", None)
         return str(message_id) if message_id is not None else None
 
+    async def _send_media_message(
+        self,
+        client: TelegramClient,
+        target_entity,
+        body: str,
+        media: tuple,
+        reply_to_message_id: Optional[str] = None,
+    ) -> Optional[str]:
+        files = [item.url for item in media if str(getattr(item, "url", "") or "").startswith(("http://", "https://"))]
+        if not files:
+            if body:
+                sent = await client.send_message(
+                    target_entity,
+                    body,
+                    reply_to=int(reply_to_message_id) if reply_to_message_id else None,
+                )
+                message_id = getattr(sent, "id", None)
+                return str(message_id) if message_id is not None else None
+            return None
+        sent = await client.send_file(
+            target_entity,
+            files if len(files) > 1 else files[0],
+            caption=body or None,
+            reply_to=int(reply_to_message_id) if reply_to_message_id else None,
+        )
+        if isinstance(sent, list):
+            sent = sent[-1] if sent else None
+        message_id = getattr(sent, "id", None)
+        return str(message_id) if message_id is not None else None
+
     async def _resolve_any_entity(self, client: TelegramClient, peer_id: int):
         if peer_id >= 0:
             return await self._resolve_direct_entity(client, peer_id)
@@ -248,11 +307,14 @@ class TelegramBackend:
             return "+%s" % phone
         return str(getattr(user, "id", "unknown"))
 
-    async def _small_user_avatar(self, client: TelegramClient, user):
+    async def _small_user_avatar(self, client: TelegramClient, user, include_content: bool = True):
         photo = getattr(user, "photo", None)
         photo_id = getattr(photo, "photo_id", None)
         if photo_id is None:
-            return None, False
+            return None, None, False
+        photo_id = str(photo_id)
+        if not include_content:
+            return None, photo_id, False
         try:
             content = await client.download_profile_photo(user, file=bytes, download_big=False)
         except Exception:
@@ -262,7 +324,7 @@ class TelegramBackend:
                 photo_id,
                 exc_info=True,
             )
-            return None, True
+            return None, photo_id, True
         if not content:
-            return None, True
-        return TelegramAvatar(photo_id=str(photo_id), content=content), False
+            return None, photo_id, True
+        return TelegramAvatar(photo_id=photo_id, content=content), photo_id, False

@@ -74,8 +74,6 @@ class TelegramCommandComponent(ComponentXMPP):
             return
 
         body = str(message["body"] or "").strip()
-        if not body:
-            return
         if message.xml.find(TRANSPORT_FAKE_OUTGOING_TAG) is not None:
             return
 
@@ -94,6 +92,8 @@ class TelegramCommandComponent(ComponentXMPP):
             return
         if to_jid.bare != self.bot_jid:
             await self._handle_direct_message(message, from_jid, to_jid, body, group_sender_jid)
+            return
+        if not body:
             return
 
         async def notify(reply_body: str) -> None:
@@ -127,12 +127,20 @@ class TelegramCommandComponent(ComponentXMPP):
         try:
             reply_to_message_ids, body = XmppMessageXml.extract_reply_to_message_ids(message)
             reply_to_message_id = reply_to_message_ids[0] if reply_to_message_ids else None
-            body, forward_references = XmppMessageXml.extract_forwarded_body_and_references(message, body)
+            body, forwarded_media, forward_references = XmppMessageXml.extract_forwarded_body_media_and_references(
+                message,
+                body,
+            )
+            reference_media = XmppMessageXml.extract_media_references(message)
+            body_media = XmppMessageXml.extract_body_media_urls(body, reference_media)
+            media = reference_media + forwarded_media + body_media
+            body = XmppMessageXml.strip_media_fallback_body(body, media).strip()
             await self.direct_message_handler(
                 XmppIncomingMessage(
                     sender=from_jid,
                     recipient=to_jid.bare,
                     body=body.strip(),
+                    media=media,
                     forward_references=forward_references,
                     group_sender_jid=group_sender_jid,
                     message_id=str(message["id"] or "") or None,

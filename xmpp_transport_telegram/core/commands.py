@@ -432,13 +432,15 @@ class CommandService:
 
     @staticmethod
     def contact_sync_signature(contact: TelegramContact) -> str:
+        avatar_photo_id = contact.avatar.photo_id if contact.avatar is not None else contact.avatar_photo_id or ""
+        avatar_variant = contact.avatar.variant if contact.avatar is not None else "small" if contact.avatar_photo_id else ""
         value = "\n".join(
             [
                 contact.title,
                 contact.username or "",
                 contact.phone or "",
-                contact.avatar.photo_id if contact.avatar is not None else "",
-                contact.avatar.variant if contact.avatar is not None else "",
+                avatar_photo_id,
+                avatar_variant,
             ]
         )
         # The signature is just a cheap idempotency key for roster sync, not a

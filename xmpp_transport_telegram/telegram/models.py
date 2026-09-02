@@ -27,6 +27,7 @@ class TelegramContact:
     username: Optional[str] = None
     phone: Optional[str] = None
     avatar: Optional[TelegramAvatar] = None
+    avatar_photo_id: Optional[str] = None
     avatar_download_failed: bool = False
 
 

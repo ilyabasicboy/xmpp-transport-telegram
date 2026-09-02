@@ -1,5 +1,7 @@
+import mimetypes
 from xml.etree import ElementTree as ET
 from typing import Optional
+from urllib.parse import unquote, urlsplit
 
 from xmpp_transport_telegram.xmpp.namespaces import (
     CHAT_MARKERS_NS,
@@ -11,7 +13,7 @@ from xmpp_transport_telegram.xmpp.namespaces import (
     TRANSPORT_FAKE_OUTGOING_TAG,
     XABBER_REFERENCES_NS,
 )
-from xmpp_transport_telegram.xmpp.models import XmppForwardReference, XmppReplyReference
+from xmpp_transport_telegram.xmpp.models import XmppForwardReference, XmppOutgoingMedia, XmppReplyReference
 
 
 class XmppMessageXml:
@@ -131,6 +133,48 @@ class XmppMessageXml:
         return comment_body, tuple(forward_references)
 
     @classmethod
+    def extract_forwarded_body_media_and_references(cls, msg, body: str) -> tuple:
+        forwarded_media = []
+        forward_references = []
+        fallback_ranges = []
+        seen_urls = set()
+        for reference in msg.xml:
+            if reference.tag != "{%s}reference" % XABBER_REFERENCES_NS:
+                continue
+            if not cls.is_forward_reference(msg, reference):
+                continue
+            forwarded_message = cls.forwarded_message(reference)
+            if forwarded_message is None:
+                continue
+            reference_range = cls.reference_body_range(reference)
+            if reference_range is not None:
+                fallback_ranges.append(reference_range)
+            forwarded_body = cls.body_text(forwarded_message)
+            media = cls.extract_media_references_from_xml(forwarded_message)
+            media = media + cls.extract_body_media_urls(forwarded_body, media)
+            forwarded_body = cls.strip_media_fallback_body(forwarded_body, media).strip()
+            forwarded_message_ids = cls.reply_target_message_ids(reference)
+            forward_references.append(
+                XmppForwardReference(
+                    message_id=forwarded_message_ids[0] if forwarded_message_ids else "",
+                    body=forwarded_body,
+                    sender=str(forwarded_message.attrib.get("from") or "").split("/", 1)[0],
+                    recipient=str(forwarded_message.attrib.get("to") or "").split("/", 1)[0],
+                    media=media,
+                    fake_outgoing=forwarded_message.find(TRANSPORT_FAKE_OUTGOING_TAG) is not None,
+                )
+            )
+            for item in media:
+                if item.url in seen_urls:
+                    continue
+                seen_urls.add(item.url)
+                forwarded_media.append(item)
+        if not forward_references:
+            return body, (), ()
+        comment_body = cls.strip_escaped_ranges(body, fallback_ranges).strip()
+        return comment_body, tuple(forwarded_media), tuple(forward_references)
+
+    @classmethod
     def is_forward_reference(cls, msg, reference: ET.Element) -> bool:
         forwarded_message = cls.forwarded_message(reference)
         if forwarded_message is None:
@@ -247,6 +291,125 @@ class XmppMessageXml:
         return tuple(dict.fromkeys(candidate for candidate in candidates if candidate))
 
     @classmethod
+    def extract_media_references(cls, msg) -> tuple:
+        return cls.extract_media_references_from_xml(msg.xml)
+
+    @classmethod
+    def extract_media_references_from_xml(cls, xml: ET.Element) -> tuple:
+        media = []
+        seen_urls = set()
+        for reference in xml:
+            if reference.tag != "{%s}reference" % XABBER_REFERENCES_NS:
+                continue
+            file_sharing = cls.child_by_local_name(reference, "file-sharing", namespace=FILES_NS)
+            if file_sharing is None:
+                continue
+            item = cls.media_from_file_sharing(file_sharing)
+            if item is None or item.url in seen_urls:
+                continue
+            seen_urls.add(item.url)
+            media.append(item)
+        return tuple(media)
+
+    @classmethod
+    def extract_body_media_urls(cls, body: str, existing_media: tuple) -> tuple:
+        existing_urls = {item.url for item in existing_media}
+        media = []
+        for line in body.splitlines():
+            url = line.strip()
+            if url in existing_urls:
+                continue
+            item = cls.media_from_gallery_url(url)
+            if item is None:
+                continue
+            existing_urls.add(item.url)
+            media.append(item)
+        return tuple(media)
+
+    @staticmethod
+    def media_from_gallery_url(url: str) -> Optional[XmppOutgoingMedia]:
+        if not url.startswith(("http://", "https://")):
+            return None
+        parsed = urlsplit(url)
+        if "/gallery/" not in parsed.path and "/upload/" not in parsed.path:
+            return None
+        name = unquote(parsed.path.rstrip("/").rsplit("/", 1)[-1])
+        if not name or "." not in name:
+            return None
+        mime_type, _encoding = mimetypes.guess_type(name)
+        return XmppOutgoingMedia(
+            url=url,
+            name=name,
+            mime_type=mime_type or "application/octet-stream",
+        )
+
+    @classmethod
+    def media_from_file_sharing(cls, file_sharing: ET.Element) -> Optional[XmppOutgoingMedia]:
+        sources = cls.child_by_local_name(file_sharing, "sources")
+        url = ""
+        if sources is not None:
+            for child in sources:
+                if cls.local_name(child.tag) != "uri":
+                    continue
+                candidate = (child.text or "").strip()
+                if candidate.startswith(("http://", "https://")):
+                    url = candidate
+                    break
+        if not url:
+            return None
+
+        file_el = cls.child_by_local_name(file_sharing, "file")
+        fields = {}
+        thumbnail_url = None
+        if file_el is not None:
+            for child in file_el:
+                local_name = cls.local_name(child.tag)
+                if local_name == "thumbnail":
+                    thumbnail_url = (child.attrib.get("uri") or "").strip() or None
+                    continue
+                fields[local_name] = (child.text or "").strip()
+
+        return XmppOutgoingMedia(
+            url=url,
+            name=fields.get("name", ""),
+            mime_type=fields.get("media-type") or fields.get("mime-type") or "application/octet-stream",
+            size=cls.positive_int(fields.get("size")) or 0,
+            thumbnail_url=thumbnail_url,
+            width=cls.positive_int(fields.get("width")),
+            height=cls.positive_int(fields.get("height")),
+            duration=cls.positive_int(fields.get("duration")),
+        )
+
+    @staticmethod
+    def strip_media_fallback_body(body: str, media: tuple) -> str:
+        result = body
+        for item in media:
+            if not item.url:
+                continue
+            lines = [line for line in result.splitlines() if line.strip() != item.url]
+            result = "\n".join(lines)
+        return result
+
+    @staticmethod
+    def child_by_local_name(parent: ET.Element, local_name: str, namespace: Optional[str] = None) -> Optional[ET.Element]:
+        for child in parent:
+            if XmppMessageXml.local_name(child.tag) != local_name:
+                continue
+            if namespace is not None and not str(child.tag).startswith("{%s}" % namespace):
+                continue
+            return child
+        return None
+
+    @staticmethod
+    def local_name(tag: str) -> str:
+        return tag.rsplit("}", 1)[-1]
+
+    @staticmethod
+    def positive_int(value: object) -> Optional[int]:
+        parsed = XmppMessageXml.nonnegative_int(value)
+        return parsed if parsed and parsed > 0 else None
+
+    @classmethod
     def reply_reference_element(cls, reply_reference: XmppReplyReference) -> ET.Element:
         fallback_prefix = cls.reply_fallback_prefix(reply_reference)
         reference = ET.Element(
@@ -331,9 +494,22 @@ class XmppMessageXml:
 
     @staticmethod
     def forward_fallback_text(forward_reference: XmppForwardReference) -> str:
-        quoted_lines = forward_reference.body.splitlines() or [forward_reference.body]
+        fallback_body = XmppMessageXml.forward_fallback_body(forward_reference)
+        quoted_lines = fallback_body.splitlines() or [fallback_body]
         quoted_text = "\n".join("> %s" % line if line else ">" for line in quoted_lines)
         return "> %s:\n%s\n" % (forward_reference.sender, quoted_text)
+
+    @staticmethod
+    def forward_fallback_body(forward_reference: XmppForwardReference) -> str:
+        parts = []
+        body = forward_reference.body.strip()
+        if body:
+            parts.append(body)
+        for item in forward_reference.media:
+            url = str(getattr(item, "url", "") or "").strip()
+            if url and url not in body:
+                parts.append(url)
+        return "\n".join(parts)
 
     @staticmethod
     def reply_fallback_prefix(reply_reference: XmppReplyReference) -> str:

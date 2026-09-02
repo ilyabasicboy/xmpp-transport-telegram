@@ -2,6 +2,7 @@ import asyncio
 import logging
 import posixpath
 import secrets
+from datetime import datetime, timezone
 from typing import Dict, Optional
 from urllib.parse import quote
 
@@ -159,7 +160,7 @@ class TelegramTransport:
             len(body),
         )
         reply_to_message_id, body = self._resolve_direct_reply_payload(xmpp_jid, str(peer_id), message)
-        forward_reference = None if reply_to_message_id else self._telegram_forward_reference_from_xmpp(message)
+        forward_reference = None if reply_to_message_id or message.media else self._telegram_forward_reference_from_xmpp(message)
         body = message.body if forward_reference is not None else self._flatten_forward_body(message, body=body)
         sent_message_id = await self.telegram.send_direct_message(
             client,
@@ -167,6 +168,7 @@ class TelegramTransport:
             body,
             reply_to_message_id=reply_to_message_id,
             forward_reference=forward_reference,
+            media=message.media,
         )
         if sent_message_id:
             self._remember_direct_reply_context(
@@ -233,7 +235,7 @@ class TelegramTransport:
                     mime_type=cached_avatar.mime_type,
                     bytes_count=cached_avatar.bytes_count,
                 )
-        elif not contact.avatar_download_failed:
+        elif contact.avatar_photo_id is None and not contact.avatar_download_failed:
             await self.repository.delete_contact_avatar(xmpp_jid, contact_jid)
         if contact.avatar_download_failed:
             return
@@ -421,7 +423,7 @@ class TelegramTransport:
             if not await client.is_user_authorized():
                 log.warning("Skipping restart contact sync for expired Telegram session %s", xmpp_jid)
                 return 0
-            contacts = await self.telegram.list_contacts(client)
+            contacts = await self.telegram.list_contacts(client, include_avatars=False)
             # Reuse the same idempotent roster write path used by /add, /sync-contacts,
             # and first login so restart recovery cannot create duplicate roster churn.
             for contact in contacts:
@@ -480,6 +482,7 @@ class TelegramTransport:
     async def _start_telegram_listener(self, xmpp_jid: str, session_data: str) -> None:
         log.debug("Starting Telegram direct-message listener for %s", xmpp_jid)
         await self._stop_telegram_listener(xmpp_jid)
+        listener_started_at = datetime.now(timezone.utc)
         client = self.telegram.client_for_session(session_data)
         await client.connect()
         if not await client.is_user_authorized():
@@ -489,21 +492,32 @@ class TelegramTransport:
 
         async def handle_event(event) -> None:
             try:
+                if self._is_stale_telegram_event(event, listener_started_at):
+                    return
                 await self._handle_incoming_telegram_message(xmpp_jid, event)
             except Exception:
                 log.exception("Telegram incoming message handler failed for %s", xmpp_jid)
 
-        async def handle_raw_update(update) -> None:
-            log.debug(
-                "Received Telegram raw update xmpp_jid=%s update_type=%s",
-                xmpp_jid,
-                type(update).__name__,
-            )
-
-        client.add_event_handler(handle_raw_update, events.Raw())
         client.add_event_handler(handle_event, events.NewMessage())
         self._telegram_clients[xmpp_jid] = client
         log.info("Started Telegram message listener for %s", xmpp_jid)
+
+    @classmethod
+    def _is_stale_telegram_event(cls, event, listener_started_at: datetime) -> bool:
+        event_date = cls._telegram_event_date(event)
+        if event_date is None:
+            return False
+        if event_date.tzinfo is None:
+            event_date = event_date.replace(tzinfo=timezone.utc)
+        return event_date < listener_started_at
+
+    @staticmethod
+    def _telegram_event_date(event):
+        event_date = getattr(event, "date", None)
+        if event_date is not None:
+            return event_date
+        message = getattr(event, "message", None)
+        return getattr(message, "date", None)
 
     async def _stop_telegram_listener(self, xmpp_jid: str) -> None:
         client = self._telegram_clients.pop(xmpp_jid, None)
@@ -695,7 +709,7 @@ class TelegramTransport:
             len(body),
         )
         reply_to_message_id, body = self._resolve_group_reply_payload(xmpp_jid, chat_id, message, body)
-        forward_reference = None if reply_to_message_id else self._telegram_forward_reference_from_xmpp(message)
+        forward_reference = None if reply_to_message_id or message.media else self._telegram_forward_reference_from_xmpp(message)
         body = "" if forward_reference is not None else self._flatten_forward_body(message, body=body)
         sent_message_id = await self.telegram.send_group_message(
             client,
@@ -703,6 +717,7 @@ class TelegramTransport:
             body,
             reply_to_message_id=reply_to_message_id,
             forward_reference=forward_reference,
+            media=message.media,
         )
         if sent_message_id:
             group_jid = self._group_jid(chat_id, xmpp_jid)

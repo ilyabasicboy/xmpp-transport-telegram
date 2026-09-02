@@ -3,7 +3,7 @@ from xml.etree import ElementTree as ET
 from xmpp_transport_telegram.core.qr_store import StoredQrImage
 from xmpp_transport_telegram.xmpp.message_xml import XmppMessageXml
 from xmpp_transport_telegram.xmpp.models import XmppForwardReference
-from xmpp_transport_telegram.xmpp.namespaces import FORWARDED_NS
+from xmpp_transport_telegram.xmpp.namespaces import FILES_NS, FORWARDED_NS, XABBER_REFERENCES_NS
 
 
 class FakeJid:
@@ -41,6 +41,39 @@ def test_body_with_media_references_adds_svg_file_sharing():
     assert xml.find(".//media-type").text == "image/svg+xml"
     assert xml.find(".//name").text == "telegram-login-qr-test.svg"
     assert xml.find(".//uri").text == image.url
+
+
+def test_extract_media_references_reads_xabber_file_sharing():
+    xml = ET.Element("message")
+    reference = ET.SubElement(xml, "{%s}reference" % XABBER_REFERENCES_NS)
+    file_sharing = ET.SubElement(reference, "{%s}file-sharing" % FILES_NS)
+    file_el = ET.SubElement(file_sharing, "file")
+    ET.SubElement(file_el, "media-type").text = "image/jpeg"
+    ET.SubElement(file_el, "name").text = "photo.jpg"
+    ET.SubElement(file_el, "size").text = "1234"
+    sources = ET.SubElement(file_sharing, "sources")
+    ET.SubElement(sources, "uri").text = "https://xabber.example/gallery/photo.jpg"
+    msg = FakeMessage("", "chat-100@telegram.example.com", xml)
+
+    media = XmppMessageXml.extract_media_references(msg)
+
+    assert len(media) == 1
+    assert media[0].url == "https://xabber.example/gallery/photo.jpg"
+    assert media[0].name == "photo.jpg"
+    assert media[0].mime_type == "image/jpeg"
+    assert media[0].size == 1234
+
+
+def test_extract_body_media_urls_reads_gallery_fallback_and_strips_body():
+    body = "caption\nhttps://xabber.example/gallery/photo.jpg"
+
+    media = XmppMessageXml.extract_body_media_urls(body, ())
+    normalized = XmppMessageXml.strip_media_fallback_body(body, media)
+
+    assert len(media) == 1
+    assert media[0].name == "photo.jpg"
+    assert media[0].mime_type == "image/jpeg"
+    assert normalized == "caption"
 
 
 def test_body_with_forward_references_adds_xabber_forward_payload():

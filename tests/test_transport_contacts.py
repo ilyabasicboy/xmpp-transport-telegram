@@ -110,7 +110,8 @@ class FakeTelegramBackend:
         self.clients.append(client)
         return client
 
-    async def list_contacts(self, client):
+    async def list_contacts(self, client, include_avatars=True):
+        self.include_avatars = include_avatars
         return self.contacts
 
     async def list_group_chats(self, client):
@@ -322,6 +323,7 @@ async def _test_restart_sync_pushes_contacts_for_connected_sessions():
 
     await transport._sync_connected_contacts_after_restart()
 
+    assert transport.telegram.include_avatars is False
     assert transport.xmpp.client.operations == [
         (
             "add-roster-contact",

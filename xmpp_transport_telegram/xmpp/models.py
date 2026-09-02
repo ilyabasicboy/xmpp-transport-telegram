@@ -32,7 +32,21 @@ class XmppForwardReference:
     body: str
     sender: str
     recipient: str
+    media: tuple = ()
     fake_outgoing: bool = False
+
+
+@dataclass(frozen=True)
+class XmppOutgoingMedia:
+    url: str
+    name: str = ""
+    mime_type: str = "application/octet-stream"
+    size: int = 0
+    thumbnail_url: Optional[str] = None
+    width: Optional[int] = None
+    height: Optional[int] = None
+    duration: Optional[int] = None
+    voice: bool = False
 
 
 @dataclass(frozen=True)
@@ -40,6 +54,7 @@ class XmppIncomingMessage:
     sender: str
     recipient: str
     body: str
+    media: tuple = ()
     forward_references: tuple = ()
     group_sender_jid: Optional[str] = None
     message_id: Optional[str] = None

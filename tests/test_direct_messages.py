@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from xml.etree import ElementTree as ET
 
@@ -11,7 +12,7 @@ from xmpp_transport_telegram.core import transport as transport_module
 from xmpp_transport_telegram.core.transport import TelegramTransport
 from xmpp_transport_telegram.runtime.config import Settings
 from xmpp_transport_telegram.telegram.models import TelegramDialog
-from xmpp_transport_telegram.xmpp.models import XmppForwardReference, XmppIncomingMessage
+from xmpp_transport_telegram.xmpp.models import XmppForwardReference, XmppIncomingMessage, XmppOutgoingMedia
 
 
 class FakeRepository:
@@ -131,8 +132,16 @@ class FakeTelegramBackend:
         self.clients.append(client)
         return client
 
-    async def send_direct_message(self, client, peer_id, body, reply_to_message_id=None, forward_reference=None):
-        self.sent.append((peer_id, body, reply_to_message_id, forward_reference))
+    async def send_direct_message(
+        self,
+        client,
+        peer_id,
+        body,
+        reply_to_message_id=None,
+        forward_reference=None,
+        media=(),
+    ):
+        self.sent.append((peer_id, body, reply_to_message_id, forward_reference, media))
         sent = await client.send_message(peer_id, body, reply_to=reply_to_message_id)
         return str(sent.id)
 
@@ -142,8 +151,16 @@ class FakeTelegramBackend:
     async def list_group_chats(self, client):
         return self.groups
 
-    async def send_group_message(self, client, peer_id, body, reply_to_message_id=None, forward_reference=None):
-        self.group_sent.append((peer_id, body, reply_to_message_id, forward_reference))
+    async def send_group_message(
+        self,
+        client,
+        peer_id,
+        body,
+        reply_to_message_id=None,
+        forward_reference=None,
+        media=(),
+    ):
+        self.group_sent.append((peer_id, body, reply_to_message_id, forward_reference, media))
         sent = await client.send_message(peer_id, body, reply_to=reply_to_message_id)
         return str(sent.id)
 
@@ -251,6 +268,7 @@ class FakeEvent:
         media=None,
         file_info=None,
         photo=None,
+        date=None,
     ):
         self.chat_id = chat_id
         self.raw_text = raw_text
@@ -265,6 +283,7 @@ class FakeEvent:
         self.sender_first_name = sender_first_name
         self.sender_last_name = sender_last_name
         self.sender_username = sender_username
+        self.date = date
         self.message = type(
             "FakeEventMessage",
             (),
@@ -275,6 +294,7 @@ class FakeEvent:
                 "media": media,
                 "file": file_info,
                 "photo": photo,
+                "date": date,
             },
         )()
 
@@ -374,9 +394,9 @@ async def _test_xmpp_direct_message_sends_to_telegram_peer():
         )
     )
 
-    assert transport.telegram.sent == [(100, "hello telegram", None, None)]
+    assert transport.telegram.sent == [(100, "hello telegram", None, None, ())]
     listener_client = transport.telegram.clients[0]
-    assert len(listener_client.handlers) == 2
+    assert len(listener_client.handlers) == 1
     assert listener_client.disconnected is False
 
 
@@ -398,6 +418,10 @@ def test_xmpp_direct_reply_resolves_xabber_quote_fallback():
 
 def test_xmpp_direct_forward_uses_telegram_native_forward():
     asyncio.run(_test_xmpp_direct_forward_uses_telegram_native_forward())
+
+
+def test_xmpp_direct_media_reaches_telegram_backend():
+    asyncio.run(_test_xmpp_direct_media_reaches_telegram_backend())
 
 
 async def _test_xmpp_direct_reply_sends_telegram_reply_to_message_id():
@@ -433,7 +457,7 @@ async def _test_xmpp_direct_reply_sends_telegram_reply_to_message_id():
         )
     )
 
-    assert transport.telegram.sent == [(100, "reply text", "901", None)]
+    assert transport.telegram.sent == [(100, "reply text", "901", None, ())]
 
 
 async def _test_xmpp_direct_reply_ignores_unknown_non_numeric_reply_id():
@@ -458,7 +482,7 @@ async def _test_xmpp_direct_reply_ignores_unknown_non_numeric_reply_id():
         )
     )
 
-    assert transport.telegram.sent == [(100, "reply text", None, None)]
+    assert transport.telegram.sent == [(100, "reply text", None, None, ())]
 
 
 async def _test_xmpp_direct_reply_resolves_xabber_quote_fallback():
@@ -516,7 +540,7 @@ async def _test_xmpp_direct_reply_resolves_xabber_quote_fallback():
         )
     )
 
-    assert transport.telegram.sent == [(100, "test", "902", None)]
+    assert transport.telegram.sent == [(100, "test", "902", None, ())]
 
 
 async def _test_xmpp_direct_forward_uses_telegram_native_forward():
@@ -548,10 +572,37 @@ async def _test_xmpp_direct_forward_uses_telegram_native_forward():
         )
     )
 
-    peer_id, body, reply_to_message_id, forward_reference = transport.telegram.sent[0]
+    peer_id, body, reply_to_message_id, forward_reference, media = transport.telegram.sent[0]
     assert (peer_id, body, reply_to_message_id) == (100, "forward comment", None)
     assert forward_reference.source_peer_id == 200
     assert forward_reference.message_id == "777"
+    assert media == ()
+
+
+async def _test_xmpp_direct_media_reaches_telegram_backend():
+    settings = _settings()
+    cipher = SessionCipher(settings.session_encryption_key)
+    repository = FakeRepository()
+    repository.session = {
+        "telegram_user_id": 42,
+        "phone": None,
+        "encrypted_session": cipher.encrypt("stored-session"),
+        "connected": True,
+    }
+    transport = TelegramTransport(settings, repository)
+    transport.telegram = FakeTelegramBackend()
+    media = (XmppOutgoingMedia(url="https://xabber.example/gallery/photo.jpg", mime_type="image/jpeg"),)
+
+    await transport.send_direct_message(
+        XmppIncomingMessage(
+            sender="user@example.com",
+            recipient="chat-100@telegram.example.com",
+            body="caption",
+            media=media,
+        )
+    )
+
+    assert transport.telegram.sent == [(100, "caption", None, None, media)]
 
 
 async def _test_xmpp_direct_message_rejects_non_chat_contact_jid():
@@ -1150,7 +1201,7 @@ async def _test_xabber_group_fanout_sends_to_telegram_group():
         )
     )
 
-    assert transport.telegram.group_sent == [(-100500, "hello telegram group", None, None)]
+    assert transport.telegram.group_sent == [(-100500, "hello telegram group", None, None, ())]
 
 
 async def _test_xabber_group_reply_sends_telegram_reply_to_message_id():
@@ -1189,7 +1240,7 @@ async def _test_xabber_group_reply_sends_telegram_reply_to_message_id():
         )
     )
 
-    assert transport.telegram.group_sent == [(-100500, "reply text", "910", None)]
+    assert transport.telegram.group_sent == [(-100500, "reply text", "910", None, ())]
 
 
 async def _test_xabber_group_structured_reply_strips_visible_quote_fallback():
@@ -1225,7 +1276,7 @@ async def _test_xabber_group_structured_reply_strips_visible_quote_fallback():
         )
     )
 
-    assert transport.telegram.group_sent == [(-100500, "test", "910", None)]
+    assert transport.telegram.group_sent == [(-100500, "test", "910", None, ())]
 
 
 async def _test_xabber_group_forward_uses_telegram_native_forward():
@@ -1259,10 +1310,11 @@ async def _test_xabber_group_forward_uses_telegram_native_forward():
         )
     )
 
-    peer_id, body, reply_to_message_id, forward_reference = transport.telegram.group_sent[0]
+    peer_id, body, reply_to_message_id, forward_reference, media = transport.telegram.group_sent[0]
     assert (peer_id, body, reply_to_message_id) == (-100500, "", None)
     assert forward_reference.source_peer_id == -100600
     assert forward_reference.message_id == "778"
+    assert media == ()
 
 
 async def _test_incoming_telegram_group_reply_sends_xabber_reply_reference():
@@ -1359,6 +1411,30 @@ async def _test_transport_group_fanout_copy_is_ignored():
 
 def test_command_login_callback_starts_telegram_listener():
     asyncio.run(_test_command_login_callback_starts_telegram_listener())
+
+
+def test_telegram_listener_ignores_messages_older_than_listener_start():
+    asyncio.run(_test_telegram_listener_ignores_messages_older_than_listener_start())
+
+
+async def _test_telegram_listener_ignores_messages_older_than_listener_start():
+    transport = TelegramTransport(_settings(), FakeRepository())
+    transport.xmpp = FakeXmpp()
+    transport.telegram = FakeTelegramBackend()
+
+    await transport._start_telegram_listener("user@example.com", "stored-session")
+
+    client = transport.telegram.clients[0]
+    new_message_handler = client.handlers[0][0]
+    old_message_time = datetime.now(timezone.utc) - timedelta(minutes=5)
+    new_message_time = datetime.now(timezone.utc) + timedelta(seconds=1)
+
+    await new_message_handler(FakeEvent(chat_id=100, raw_text="old", date=old_message_time))
+    await new_message_handler(FakeEvent(chat_id=100, raw_text="new", date=new_message_time))
+
+    assert transport.xmpp.client.direct_messages == [
+        ("user@example.com", 100, "new", "900", None, (), False)
+    ]
 
 
 async def _test_command_login_callback_starts_telegram_listener():
