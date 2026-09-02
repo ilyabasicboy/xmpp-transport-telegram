@@ -166,6 +166,7 @@ class TelegramCommandComponent(ComponentXMPP):
         message_id: Optional[str] = None,
         reply_reference: Optional[XmppReplyReference] = None,
         forward_references: tuple = (),
+        media: tuple = (),
         fake_outgoing: bool = False,
     ) -> None:
         from_jid = "chat-%s@%s" % (peer_id, self.component_domain)
@@ -178,6 +179,7 @@ class TelegramCommandComponent(ComponentXMPP):
         if reply_reference is not None:
             body = XmppMessageXml.reply_fallback_prefix(reply_reference) + body
         body, forward_reference_elements = XmppMessageXml.body_with_forward_references(body, forward_references)
+        body, media_reference_elements = XmppMessageXml.body_with_media_references(body, media)
         message = self._make_chat_message(to_jid, from_jid, body)
         if message_id:
             message["id"] = message_id
@@ -188,6 +190,8 @@ class TelegramCommandComponent(ComponentXMPP):
         if reply_reference is not None:
             message.xml.append(XmppMessageXml.reply_reference_element(reply_reference))
         for reference in forward_reference_elements:
+            message.xml.append(reference)
+        for reference in media_reference_elements:
             message.xml.append(reference)
         message.send()
 
@@ -227,11 +231,13 @@ class TelegramCommandComponent(ComponentXMPP):
         message_id: str,
         reply_reference: Optional[XmppReplyReference] = None,
         forward_references: tuple = (),
+        media: tuple = (),
         fake_outgoing: bool = False,
     ) -> None:
         if reply_reference is not None:
             body = XmppMessageXml.reply_fallback_prefix(reply_reference) + body
         body, forward_reference_elements = XmppMessageXml.body_with_forward_references(body, forward_references)
+        body, media_reference_elements = XmppMessageXml.body_with_media_references(body, media)
         message = self.make_message(
             mfrom=sender,
             mto=group_jid,
@@ -246,6 +252,8 @@ class TelegramCommandComponent(ComponentXMPP):
         if reply_reference is not None:
             message.xml.append(XmppMessageXml.reply_reference_element(reply_reference))
         for reference in forward_reference_elements:
+            message.xml.append(reference)
+        for reference in media_reference_elements:
             message.xml.append(reference)
         message.send()
 

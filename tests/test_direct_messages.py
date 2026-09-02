@@ -1,4 +1,5 @@
 import asyncio
+from types import SimpleNamespace
 from xml.etree import ElementTree as ET
 
 from cryptography.fernet import Fernet
@@ -6,6 +7,7 @@ from cryptography.fernet import Fernet
 from xmpp_transport_telegram.core.commands import CommandService
 from xmpp_transport_telegram.core.session_manager import SessionCipher
 from xmpp_transport_telegram.core.state import DirectReplyContext
+from xmpp_transport_telegram.core import transport as transport_module
 from xmpp_transport_telegram.core.transport import TelegramTransport
 from xmpp_transport_telegram.runtime.config import Settings
 from xmpp_transport_telegram.telegram.models import TelegramDialog
@@ -17,6 +19,7 @@ class FakeRepository:
         self.account_id = 1
         self.session = None
         self.signatures = {}
+        self.media_refs = {}
 
     async def ensure_xmpp_account(self, xmpp_jid):
         return self.account_id
@@ -46,6 +49,32 @@ class FakeRepository:
     ):
         self.signatures[(xmpp_jid, item_jid)] = sync_signature
 
+    async def create_media_reference(
+        self,
+        token,
+        owner_jid,
+        peer_id,
+        message_id,
+        file_name,
+        mime_type,
+        bytes_count,
+        width,
+        height,
+    ):
+        self.media_refs[token] = {
+            "owner_jid": owner_jid,
+            "peer_id": peer_id,
+            "message_id": message_id,
+            "file_name": file_name,
+            "mime_type": mime_type,
+            "bytes_count": bytes_count,
+            "width": width,
+            "height": height,
+        }
+
+    async def get_media_reference(self, token):
+        return self.media_refs.get(token)
+
 
 class FakeTelegramClient:
     def __init__(self, authorized=True):
@@ -54,6 +83,8 @@ class FakeTelegramClient:
         self.disconnected = False
         self.sent_messages = []
         self.handlers = []
+        self.messages = {}
+        self.downloaded_media = []
 
     async def connect(self):
         self.connected = True
@@ -71,6 +102,18 @@ class FakeTelegramClient:
         self.sent_messages.append((peer_id, body, reply_to))
         return type("FakeSentMessage", (), {"id": 777})()
 
+    async def get_messages(self, entity, ids):
+        return self.messages.get((entity, ids))
+
+    def iter_download(self, media, request_size=524288, file_size=None):
+        self.downloaded_media.append((media, request_size, file_size))
+
+        async def chunks():
+            for chunk in getattr(media, "chunks", (b"chunk",)):
+                yield chunk
+
+        return chunks()
+
     def add_event_handler(self, handler, event_builder):
         self.handlers.append((handler, event_builder))
 
@@ -81,6 +124,7 @@ class FakeTelegramBackend:
         self.sent = []
         self.group_sent = []
         self.groups = []
+        self.media = None
 
     def client_for_session(self, session_data=None):
         client = FakeTelegramClient()
@@ -103,11 +147,23 @@ class FakeTelegramBackend:
         sent = await client.send_message(peer_id, body, reply_to=reply_to_message_id)
         return str(sent.id)
 
+    async def get_message_media(self, client, peer_id, message_id):
+        if self.media is not None:
+            return self.media
+        message = await client.get_messages(peer_id, ids=int(message_id))
+        if message is None or getattr(message, "media", None) is None:
+            raise FileNotFoundError("missing media")
+        return message.media
+
+    def iter_media_download(self, client, media, request_size, file_size=None):
+        return client.iter_download(media, request_size=request_size, file_size=file_size)
+
 
 class FakeXmppClient:
     def __init__(self):
         self.direct_messages = []
         self.group_messages = []
+        self.direct_media = []
         self.created_groups = []
         self.updated_groups = []
         self.invites = []
@@ -124,13 +180,18 @@ class FakeXmppClient:
         message_id=None,
         reply_reference=None,
         forward_references=(),
+        media=(),
         fake_outgoing=False,
     ):
         self.direct_messages.append(
             (to_jid, peer_id, body, message_id, reply_reference, forward_references, fake_outgoing)
         )
+        self.direct_media.append(media)
 
     def send_xabber_group_message(self, **kwargs):
+        if kwargs.get("media") == ():
+            kwargs = dict(kwargs)
+            kwargs.pop("media")
         self.group_messages.append(kwargs)
 
     async def create_xabber_group(self, **kwargs):
@@ -187,6 +248,9 @@ class FakeEvent:
         sender_username=None,
         reply_to_msg_id=None,
         fwd_from=None,
+        media=None,
+        file_info=None,
+        photo=None,
     ):
         self.chat_id = chat_id
         self.raw_text = raw_text
@@ -204,7 +268,14 @@ class FakeEvent:
         self.message = type(
             "FakeEventMessage",
             (),
-            {"id": message_id, "reply_to_msg_id": reply_to_msg_id, "fwd_from": fwd_from},
+            {
+                "id": message_id,
+                "reply_to_msg_id": reply_to_msg_id,
+                "fwd_from": fwd_from,
+                "media": media,
+                "file": file_info,
+                "photo": photo,
+            },
         )()
 
     async def get_chat(self):
@@ -228,6 +299,27 @@ class FakeTelegramPeer:
         self.user_id = user_id
         self.chat_id = chat_id
         self.channel_id = channel_id
+
+
+class FakeStreamResponse:
+    instances = []
+
+    def __init__(self, status=200, headers=None):
+        self.status = status
+        self.headers = headers or {}
+        self.chunks = []
+        self.prepared = False
+        self.eof = False
+        self.__class__.instances.append(self)
+
+    async def prepare(self, request):
+        self.prepared = True
+
+    async def write(self, chunk):
+        self.chunks.append(chunk)
+
+    async def write_eof(self):
+        self.eof = True
 
 
 class FakeForwardHeader:
@@ -513,6 +605,86 @@ async def _test_incoming_telegram_direct_message_can_use_sender_id():
     assert transport.xmpp.client.direct_messages == [
         ("user@example.com", 200, "hello from bot", "900", None, (), False)
     ]
+
+
+def test_incoming_telegram_direct_media_only_sends_file_reference():
+    asyncio.run(_test_incoming_telegram_direct_media_only_sends_file_reference())
+
+
+async def _test_incoming_telegram_direct_media_only_sends_file_reference():
+    repository = FakeRepository()
+    transport = TelegramTransport(_settings(), repository)
+    transport.xmpp = FakeXmpp()
+    file_info = type(
+        "FakeFileInfo",
+        (),
+        {
+            "name": "photo.jpg",
+            "mime_type": "image/jpeg",
+            "size": 1234,
+            "width": 640,
+            "height": 480,
+        },
+    )()
+
+    await transport._handle_incoming_telegram_message(
+        "user@example.com",
+        FakeEvent(chat_id=100, raw_text="", message_id=901, media=object(), file_info=file_info, photo=object()),
+    )
+
+    assert len(repository.media_refs) == 1
+    media = transport.xmpp.client.direct_media[0][0]
+    assert media.name == "photo.jpg"
+    assert media.mime_type == "image/jpeg"
+    assert media.size == 1234
+    assert media.width == 640
+    assert media.height == 480
+    assert media.url.startswith("http://127.0.0.1:8089/media/")
+    assert transport.xmpp.client.direct_messages == [
+        ("user@example.com", 100, "", "901", None, (), False)
+    ]
+
+
+def test_stream_media_proxies_telegram_chunks(monkeypatch):
+    asyncio.run(_test_stream_media_proxies_telegram_chunks(monkeypatch))
+
+
+async def _test_stream_media_proxies_telegram_chunks(monkeypatch):
+    settings = _settings()
+    cipher = SessionCipher(settings.session_encryption_key)
+    repository = FakeRepository()
+    repository.session = {
+        "telegram_user_id": 42,
+        "phone": None,
+        "encrypted_session": cipher.encrypt("stored-session"),
+        "connected": True,
+    }
+    repository.media_refs["token"] = {
+        "owner_jid": "user@example.com",
+        "peer_id": 100,
+        "message_id": "901",
+        "file_name": "photo.jpg",
+        "mime_type": "image/jpeg",
+        "bytes_count": 7,
+        "width": 640,
+        "height": 480,
+    }
+    transport = TelegramTransport(settings, repository)
+    telegram = FakeTelegramBackend()
+    telegram.media = SimpleNamespace(chunks=(b"abc", b"defg"))
+    transport.telegram = telegram
+    FakeStreamResponse.instances = []
+    monkeypatch.setattr(transport_module.web, "StreamResponse", FakeStreamResponse)
+    request = SimpleNamespace(match_info={"token": "token"})
+
+    response = await transport.stream_media(request)
+
+    assert response.prepared
+    assert response.eof
+    assert response.chunks == [b"abc", b"defg"]
+    assert response.headers["Content-Type"] == "image/jpeg"
+    assert response.headers["Content-Length"] == "7"
+    assert telegram.clients[0].disconnected
 
 
 def test_incoming_telegram_direct_reply_sends_xabber_reply_reference():
@@ -1250,6 +1422,8 @@ def _settings():
         avatar_max_bytes=524288,
         avatar_unreferenced_ttl_days=7,
         avatar_cleanup_interval_seconds=86400,
+        media_base_url="http://127.0.0.1:8089",
+        media_stream_request_size=524288,
         log_level="INFO",
         log_file="",
         log_max_bytes=10485760,

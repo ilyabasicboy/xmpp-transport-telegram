@@ -93,6 +93,23 @@ class Repository:
 
                 CREATE INDEX IF NOT EXISTS idx_telegram_contact_avatars_hash
                 ON telegram_contact_avatars (content_hash);
+
+                CREATE TABLE IF NOT EXISTS telegram_media_references (
+                    token TEXT PRIMARY KEY,
+                    owner_jid TEXT NOT NULL,
+                    peer_id BIGINT NOT NULL,
+                    message_id TEXT NOT NULL,
+                    file_name TEXT NOT NULL,
+                    mime_type TEXT NOT NULL,
+                    bytes_count BIGINT,
+                    width INTEGER,
+                    height INTEGER,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    accessed_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_telegram_media_refs_owner
+                ON telegram_media_references (owner_jid);
                 """
             )
 
@@ -452,4 +469,68 @@ class Repository:
                 owner_jid,
                 contact_jid,
                 variant,
+            )
+
+    async def create_media_reference(
+        self,
+        token: str,
+        owner_jid: str,
+        peer_id: int,
+        message_id: str,
+        file_name: str,
+        mime_type: str,
+        bytes_count,
+        width,
+        height,
+    ) -> None:
+        if self.pool is None:
+            raise RuntimeError("Repository is not connected")
+        async with self.pool.acquire() as connection:
+            await connection.execute(
+                """
+                INSERT INTO telegram_media_references (
+                    token,
+                    owner_jid,
+                    peer_id,
+                    message_id,
+                    file_name,
+                    mime_type,
+                    bytes_count,
+                    width,
+                    height
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                ON CONFLICT (token) DO NOTHING
+                """,
+                token,
+                owner_jid,
+                peer_id,
+                message_id,
+                file_name,
+                mime_type,
+                bytes_count,
+                width,
+                height,
+            )
+
+    async def get_media_reference(self, token: str):
+        if self.pool is None:
+            raise RuntimeError("Repository is not connected")
+        async with self.pool.acquire() as connection:
+            return await connection.fetchrow(
+                """
+                UPDATE telegram_media_references
+                SET accessed_at = now()
+                WHERE token = $1
+                RETURNING
+                    owner_jid,
+                    peer_id,
+                    message_id,
+                    file_name,
+                    mime_type,
+                    bytes_count,
+                    width,
+                    height
+                """,
+                token,
             )

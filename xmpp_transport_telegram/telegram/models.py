@@ -34,3 +34,14 @@ class TelegramContact:
 class TelegramForwardReference:
     source_peer_id: int
     message_id: str
+
+
+@dataclass(frozen=True)
+class TelegramMedia:
+    url: str
+    name: str
+    mime_type: str
+    size: Optional[int] = None
+    width: Optional[int] = None
+    height: Optional[int] = None
+    thumbnail_url: Optional[str] = None

@@ -49,13 +49,18 @@ async def run(config_path: str) -> None:
     await repository.connect()
     await repository.migrate()
 
-    app = create_app(settings.qr_storage_dir, settings.avatar_storage_dir, repository)
+    transport = TelegramTransport(settings, repository)
+    app = create_app(
+        settings.qr_storage_dir,
+        settings.avatar_storage_dir,
+        repository,
+        media_handler=transport.stream_media,
+    )
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, settings.health_host, settings.health_port)
     await site.start()
 
-    transport = TelegramTransport(settings, repository)
     try:
         await transport.run_forever()
     finally:

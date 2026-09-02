@@ -447,6 +447,8 @@ def _settings():
         avatar_max_bytes=524288,
         avatar_unreferenced_ttl_days=7,
         avatar_cleanup_interval_seconds=86400,
+        media_base_url="http://127.0.0.1:8089",
+        media_stream_request_size=524288,
         log_level="INFO",
         log_file="",
         log_max_bytes=10485760,

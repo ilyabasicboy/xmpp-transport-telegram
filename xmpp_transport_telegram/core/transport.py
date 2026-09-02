@@ -1,7 +1,11 @@
 import asyncio
 import logging
+import posixpath
+import secrets
 from typing import Dict, Optional
+from urllib.parse import quote
 
+from aiohttp import web
 from telethon import events
 
 from xmpp_transport_telegram.core.avatar_cache import AvatarCache
@@ -12,7 +16,7 @@ from xmpp_transport_telegram.core.state import DirectReplyContext
 from xmpp_transport_telegram.runtime.config import Settings
 from xmpp_transport_telegram.storage.repository import Repository
 from xmpp_transport_telegram.telegram.backend import TelegramBackend
-from xmpp_transport_telegram.telegram.models import TelegramDialog, TelegramForwardReference
+from xmpp_transport_telegram.telegram.models import TelegramDialog, TelegramForwardReference, TelegramMedia
 from xmpp_transport_telegram.xmpp.component import XmppComponent
 from xmpp_transport_telegram.xmpp.models import XmppForwardReference, XmppIncomingMessage, XmppReplyReference
 
@@ -52,6 +56,45 @@ class TelegramTransport:
         self._group_protocol_members: set = set()
         self._avatar_cleanup_task: Optional[asyncio.Task] = None
         self._stopped = asyncio.Event()
+
+    async def stream_media(self, request: web.Request) -> web.StreamResponse:
+        token = request.match_info["token"]
+        row = await self.repository.get_media_reference(token)
+        if row is None:
+            raise web.HTTPNotFound()
+        session_data = await self._load_connected_session_data(row["owner_jid"])
+        client = self.telegram.client_for_session(session_data)
+        await client.connect()
+        try:
+            if not await client.is_user_authorized():
+                raise web.HTTPNotFound()
+            media = await self.telegram.get_message_media(
+                client,
+                int(row["peer_id"]),
+                str(row["message_id"]),
+            )
+            headers = {
+                "Content-Type": row["mime_type"],
+                "Content-Disposition": 'inline; filename="%s"' % self._http_header_filename(row["file_name"]),
+                "Cache-Control": "private, max-age=300",
+            }
+            if row["bytes_count"] is not None:
+                headers["Content-Length"] = str(row["bytes_count"])
+            response = web.StreamResponse(status=200, headers=headers)
+            await response.prepare(request)
+            async for chunk in self.telegram.iter_media_download(
+                client,
+                media,
+                request_size=self.settings.media_stream_request_size,
+                file_size=row["bytes_count"],
+            ):
+                await response.write(bytes(chunk))
+            await response.write_eof()
+            return response
+        except FileNotFoundError:
+            raise web.HTTPNotFound()
+        finally:
+            await client.disconnect()
 
     async def run_forever(self) -> None:
         await self.xmpp.start()
@@ -486,8 +529,9 @@ class TelegramTransport:
         is_outgoing = getattr(event, "out", False)
         is_group_chat = self._is_telegram_group_chat_event(event)
         body = str(getattr(event, "raw_text", "") or "").strip()
-        if not body:
-            log.debug("Ignoring Telegram event without text body for %s", xmpp_jid)
+        media = await self._media_reference_from_event(xmpp_jid, event)
+        if not body and media is None:
+            log.debug("Ignoring Telegram event without text body or media for %s", xmpp_jid)
             return
         peer_id = self._peer_id_from_incoming_event(event)
         if peer_id is None:
@@ -521,6 +565,7 @@ class TelegramTransport:
             message_id=message_id,
             reply_reference=reply_reference,
             forward_references=(forward_reference,) if forward_reference is not None else (),
+            media=(media,) if media is not None else (),
             fake_outgoing=fake_outgoing,
         )
         contact_jid = "chat-%s@%s" % (peer_id, self.settings.xmpp_component_jid)
@@ -586,6 +631,7 @@ class TelegramTransport:
             nickname=sender_name,
             auto_join=sender.endswith("@%s" % self.settings.xmpp_component_jid),
         )
+        media = await self._media_reference_from_event(xmpp_jid, event)
         forward_reference = self._forward_reference_from_telegram_event(
             event,
             fallback_recipient=self._group_jid(str(peer_id), xmpp_jid),
@@ -615,6 +661,7 @@ class TelegramTransport:
             message_id=message_id,
             reply_reference=reply_reference,
             forward_references=(forward_reference,) if forward_reference is not None else (),
+            media=(media,) if media is not None else (),
             fake_outgoing=True,
         )
         self._remember_group_reply_context(
@@ -734,6 +781,69 @@ class TelegramTransport:
             reply_to = getattr(message, "reply_to", None)
             reply_to_msg_id = getattr(reply_to, "reply_to_msg_id", None) if reply_to is not None else None
         return str(reply_to_msg_id) if reply_to_msg_id is not None else None
+
+    async def _media_reference_from_event(self, xmpp_jid: str, event) -> Optional[TelegramMedia]:
+        message = getattr(event, "message", None)
+        media = getattr(message, "media", None) if message is not None else None
+        if media is None:
+            return None
+        peer_id = self._peer_id_from_incoming_event(event)
+        if peer_id is None:
+            return None
+        message_id = self._incoming_telegram_message_id(event)
+        file_info = getattr(message, "file", None)
+        mime_type = getattr(file_info, "mime_type", None) or self._telegram_media_mime_type(message)
+        file_name = self._safe_media_filename(
+            getattr(file_info, "name", None),
+            mime_type,
+            message_id,
+        )
+        bytes_count = getattr(file_info, "size", None)
+        width = getattr(file_info, "width", None)
+        height = getattr(file_info, "height", None)
+        token = secrets.token_urlsafe(24)
+        url = "%s/media/%s/%s" % (
+            self.settings.media_base_url,
+            token,
+            quote(file_name),
+        )
+        await self.repository.create_media_reference(
+            token=token,
+            owner_jid=xmpp_jid,
+            peer_id=int(peer_id),
+            message_id=message_id,
+            file_name=file_name,
+            mime_type=mime_type,
+            bytes_count=bytes_count,
+            width=width,
+            height=height,
+        )
+        return TelegramMedia(
+            url=url,
+            name=file_name,
+            mime_type=mime_type,
+            size=bytes_count,
+            width=width,
+            height=height,
+        )
+
+    @staticmethod
+    def _telegram_media_mime_type(message) -> str:
+        if getattr(message, "photo", None) is not None:
+            return "image/jpeg"
+        return "application/octet-stream"
+
+    @staticmethod
+    def _safe_media_filename(name, mime_type: str, message_id: str) -> str:
+        value = posixpath.basename(str(name or "").strip())
+        if value in ("", ".", ".."):
+            extension = ".jpg" if mime_type == "image/jpeg" else ".bin"
+            value = "telegram-%s%s" % (message_id, extension)
+        return "".join(char if char.isalnum() or char in "._- " else "_" for char in value)
+
+    @staticmethod
+    def _http_header_filename(name) -> str:
+        return str(name).replace("\\", "_").replace('"', "_")
 
     def _remember_direct_reply_context(
         self,

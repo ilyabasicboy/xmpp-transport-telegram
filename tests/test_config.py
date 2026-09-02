@@ -33,3 +33,5 @@ api_hash = hash
     assert settings.avatar_max_bytes == 524288
     assert settings.avatar_unreferenced_ttl_days == 7
     assert settings.avatar_cleanup_interval_seconds == 86400
+    assert settings.media_base_url == "http://127.0.0.1:8089"
+    assert settings.media_stream_request_size == 524288

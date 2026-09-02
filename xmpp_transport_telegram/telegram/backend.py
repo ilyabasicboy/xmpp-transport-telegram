@@ -212,6 +212,27 @@ class TelegramBackend:
             return await self._resolve_direct_entity(client, peer_id)
         return await self._resolve_group_entity(client, peer_id)
 
+    async def get_message_media(self, client: TelegramClient, peer_id: int, message_id: str):
+        entity = await self._resolve_any_entity(client, peer_id)
+        message = await client.get_messages(entity, ids=int(message_id))
+        if message is None or getattr(message, "media", None) is None:
+            raise FileNotFoundError("Telegram message media is not available")
+        return message.media
+
+    def iter_media_download(
+        self,
+        client: TelegramClient,
+        media,
+        *,
+        request_size: int,
+        file_size: Optional[int] = None,
+    ):
+        return client.iter_download(
+            media,
+            request_size=request_size,
+            file_size=file_size,
+        )
+
     @staticmethod
     def _user_title(user) -> str:
         first_name = getattr(user, "first_name", None)
