@@ -1,7 +1,13 @@
 import logging
+import os
+import posixpath
+import tempfile
 from typing import List, Optional
+from urllib.parse import unquote, urlsplit
 
+import aiohttp
 from telethon import TelegramClient
+from telethon.errors import WebpageCurlFailedError, WebpageMediaEmptyError
 from telethon.sessions import StringSession
 from telethon.tl.functions.contacts import GetContactsRequest
 
@@ -15,6 +21,8 @@ from xmpp_transport_telegram.telegram.models import (
 
 
 log = logging.getLogger(__name__)
+
+MAX_OUTGOING_MEDIA_BYTES = 50 * 1024 * 1024
 
 
 class TelegramBackend:
@@ -244,8 +252,11 @@ class TelegramBackend:
         media: tuple,
         reply_to_message_id: Optional[str] = None,
     ) -> Optional[str]:
-        files = [item.url for item in media if str(getattr(item, "url", "") or "").startswith(("http://", "https://"))]
-        if not files:
+        media_items = [
+            item for item in media if str(getattr(item, "url", "") or "").startswith(("http://", "https://"))
+        ]
+        files = [item.url for item in media_items]
+        if not media_items:
             if body:
                 sent = await client.send_message(
                     target_entity,
@@ -255,16 +266,134 @@ class TelegramBackend:
                 message_id = getattr(sent, "id", None)
                 return str(message_id) if message_id is not None else None
             return None
-        sent = await client.send_file(
-            target_entity,
-            files if len(files) > 1 else files[0],
-            caption=body or None,
-            reply_to=int(reply_to_message_id) if reply_to_message_id else None,
-        )
+        try:
+            sent = await self._send_file(
+                client,
+                target_entity,
+                files if len(files) > 1 else files[0],
+                body,
+                reply_to_message_id=reply_to_message_id,
+            )
+        except (WebpageCurlFailedError, WebpageMediaEmptyError):
+            sent = await self._send_downloaded_media_or_link_fallback(
+                client,
+                target_entity,
+                media_items,
+                body,
+                reply_to_message_id=reply_to_message_id,
+            )
         if isinstance(sent, list):
             sent = sent[-1] if sent else None
         message_id = getattr(sent, "id", None)
         return str(message_id) if message_id is not None else None
+
+    async def _send_file(
+        self,
+        client: TelegramClient,
+        target_entity,
+        files,
+        body: str,
+        reply_to_message_id: Optional[str] = None,
+        mime_type: Optional[str] = None,
+        file_size: Optional[int] = None,
+    ):
+        return await client.send_file(
+            target_entity,
+            files,
+            caption=body or None,
+            reply_to=int(reply_to_message_id) if reply_to_message_id else None,
+            mime_type=mime_type,
+            file_size=file_size,
+        )
+
+    async def _send_downloaded_media_or_link_fallback(
+        self,
+        client: TelegramClient,
+        target_entity,
+        media_items: list,
+        body: str,
+        reply_to_message_id: Optional[str] = None,
+    ):
+        downloaded = []
+        try:
+            downloaded = await self._download_outgoing_media_files(media_items)
+            paths = [item["path"] for item in downloaded]
+            first = downloaded[0] if len(downloaded) == 1 else {}
+            return await self._send_file(
+                client,
+                target_entity,
+                paths if len(paths) > 1 else paths[0],
+                body,
+                reply_to_message_id=reply_to_message_id,
+                mime_type=first.get("mime_type"),
+                file_size=first.get("file_size"),
+            )
+        except Exception:
+            log.warning("Could not upload XMPP media URL to Telegram; sending link fallback", exc_info=True)
+            return await client.send_message(
+                target_entity,
+                self._media_link_fallback_body(body, media_items),
+                reply_to=int(reply_to_message_id) if reply_to_message_id else None,
+            )
+        finally:
+            for item in downloaded:
+                try:
+                    os.unlink(item["path"])
+                except OSError:
+                    log.debug("Could not remove temporary Telegram upload file %s", item["path"], exc_info=True)
+
+    async def _download_outgoing_media_files(self, media_items: list) -> list:
+        downloaded = []
+        async with aiohttp.ClientSession() as session:
+            for item in media_items:
+                downloaded.append(await self._download_outgoing_media_file(session, item))
+        return downloaded
+
+    async def _download_outgoing_media_file(self, session: aiohttp.ClientSession, media) -> dict:
+        url = str(getattr(media, "url", "") or "")
+        async with session.get(url) as response:
+            response.raise_for_status()
+            content_length = response.headers.get("Content-Length")
+            if content_length is not None and int(content_length) > MAX_OUTGOING_MEDIA_BYTES:
+                raise ValueError("Outgoing XMPP media is too large for Telegram upload fallback")
+            path = self._temporary_media_path(media)
+            size = 0
+            try:
+                with open(path, "wb") as handle:
+                    async for chunk in response.content.iter_chunked(65536):
+                        size += len(chunk)
+                        if size > MAX_OUTGOING_MEDIA_BYTES:
+                            raise ValueError("Outgoing XMPP media is too large for Telegram upload fallback")
+                        handle.write(chunk)
+            except Exception:
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
+                raise
+        return {
+            "path": path,
+            "file_size": size,
+            "mime_type": str(getattr(media, "mime_type", "") or "") or None,
+        }
+
+    @classmethod
+    def _temporary_media_path(cls, media) -> str:
+        name = str(getattr(media, "name", "") or "").strip()
+        if not name:
+            path = unquote(urlsplit(str(getattr(media, "url", "") or "")).path)
+            name = posixpath.basename(path)
+        suffix = os.path.splitext(name)[1] if name else ""
+        handle = tempfile.NamedTemporaryFile(prefix="xmpp-telegram-upload-", suffix=suffix, delete=False)
+        path = handle.name
+        handle.close()
+        return path
+
+    @staticmethod
+    def _media_link_fallback_body(body: str, media_items: list) -> str:
+        urls = [str(getattr(item, "url", "") or "") for item in media_items]
+        parts = [part for part in (body.strip(), "\n".join(urls)) if part]
+        return "\n".join(parts)
 
     async def _resolve_any_entity(self, client: TelegramClient, peer_id: int):
         if peer_id >= 0:

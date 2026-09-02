@@ -1,6 +1,7 @@
 import asyncio
 
 from cryptography.fernet import Fernet
+from telethon.errors import WebpageMediaEmptyError
 
 from xmpp_transport_telegram.runtime.config import Settings
 from xmpp_transport_telegram.telegram.backend import TelegramBackend
@@ -46,6 +47,7 @@ class FakeClient:
         self.forwarded_messages = []
         self.profile_photo_downloads = []
         self.fail_profile_photo_download = False
+        self.fail_url_send_file = False
 
     async def __call__(self, request):
         return type("FakeContactsResult", (), {"users": list(self.users)})()
@@ -58,8 +60,10 @@ class FakeClient:
         self.sent_messages.append((entity, body, reply_to))
         return type("FakeSentMessage", (), {"id": 777})()
 
-    async def send_file(self, entity, file, caption=None, reply_to=None):
+    async def send_file(self, entity, file, caption=None, reply_to=None, **kwargs):
         self.sent_files.append((entity, file, caption, reply_to))
+        if self.fail_url_send_file and isinstance(file, str) and file.startswith(("http://", "https://")):
+            raise WebpageMediaEmptyError(request=None)
         return type("FakeSentFileMessage", (), {"id": 778})()
 
     async def forward_messages(self, entity, message_id, from_peer=None):
@@ -194,6 +198,14 @@ def test_send_direct_message_sends_media_url_with_caption():
     asyncio.run(_test_send_direct_message_sends_media_url_with_caption())
 
 
+def test_send_direct_message_uploads_downloaded_media_when_telegram_rejects_url():
+    asyncio.run(_test_send_direct_message_uploads_downloaded_media_when_telegram_rejects_url())
+
+
+def test_send_direct_message_sends_link_when_media_download_fails():
+    asyncio.run(_test_send_direct_message_sends_link_when_media_download_fails())
+
+
 def test_send_direct_message_forwards_from_source_peer():
     asyncio.run(_test_send_direct_message_forwards_from_source_peer())
 
@@ -225,6 +237,61 @@ async def _test_send_direct_message_sends_media_url_with_caption():
     assert message_id == "778"
     assert client.sent_files == [(bot_entity, "https://xabber.example/gallery/photo.jpg", "caption", 123)]
     assert client.sent_messages == []
+
+
+async def _test_send_direct_message_uploads_downloaded_media_when_telegram_rejects_url():
+    backend = TelegramBackend(_settings())
+    bot_entity = FakeEntity(user_id=200, username="test_bot", bot=True)
+    client = FakeClient([FakeDialog(200, "Bot", bot_entity)])
+    client.fail_url_send_file = True
+
+    async def download_media(media_items):
+        assert [item.url for item in media_items] == ["https://xabber.example/gallery/photo.jpg"]
+        return [
+            {
+                "path": "/tmp/photo.jpg",
+                "mime_type": "image/jpeg",
+                "file_size": 1234,
+            }
+        ]
+
+    backend._download_outgoing_media_files = download_media
+
+    message_id = await backend.send_direct_message(
+        client,
+        200,
+        "caption",
+        media=(XmppOutgoingMedia(url="https://xabber.example/gallery/photo.jpg", mime_type="image/jpeg"),),
+    )
+
+    assert message_id == "778"
+    assert client.sent_files == [
+        (bot_entity, "https://xabber.example/gallery/photo.jpg", "caption", None),
+        (bot_entity, "/tmp/photo.jpg", "caption", None),
+    ]
+    assert client.sent_messages == []
+
+
+async def _test_send_direct_message_sends_link_when_media_download_fails():
+    backend = TelegramBackend(_settings())
+    bot_entity = FakeEntity(user_id=200, username="test_bot", bot=True)
+    client = FakeClient([FakeDialog(200, "Bot", bot_entity)])
+    client.fail_url_send_file = True
+
+    async def download_media(_media_items):
+        raise RuntimeError("download failed")
+
+    backend._download_outgoing_media_files = download_media
+
+    message_id = await backend.send_direct_message(
+        client,
+        200,
+        "caption",
+        media=(XmppOutgoingMedia(url="https://xabber.example/gallery/photo.jpg", mime_type="image/jpeg"),),
+    )
+
+    assert message_id == "777"
+    assert client.sent_messages == [(bot_entity, "caption\nhttps://xabber.example/gallery/photo.jpg", None)]
 
 
 async def _test_send_direct_message_forwards_from_source_peer():
