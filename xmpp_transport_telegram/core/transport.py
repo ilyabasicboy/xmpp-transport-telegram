@@ -27,7 +27,11 @@ class TelegramTransport:
         self.settings = settings
         self.repository = repository
         self.telegram = TelegramBackend(settings)
-        self.avatar_cache = AvatarCache(settings.avatar_storage_dir, settings.avatar_base_url)
+        self.avatar_cache = AvatarCache(
+            settings.avatar_storage_dir,
+            settings.avatar_base_url,
+            settings.avatar_max_bytes,
+        )
         self.session_cipher = SessionCipher(settings.session_encryption_key)
         self.qr_store = QrCodeStore(settings.qr_storage_dir, "%s/qr" % settings.qr_base_url)
         self.commands = CommandService(
@@ -46,16 +50,25 @@ class TelegramTransport:
         self._group_reply_aliases: Dict[tuple, str] = {}
         self._group_ensure_signatures: Dict[tuple, str] = {}
         self._group_protocol_members: set = set()
+        self._avatar_cleanup_task: Optional[asyncio.Task] = None
         self._stopped = asyncio.Event()
 
     async def run_forever(self) -> None:
         await self.xmpp.start()
+        self._avatar_cleanup_task = asyncio.create_task(self._avatar_cleanup_loop())
         await self._sync_connected_contacts_after_restart()
         log.info("Telegram transport backend started")
         await self._stopped.wait()
 
     async def stop(self) -> None:
         self._stopped.set()
+        if self._avatar_cleanup_task is not None:
+            self._avatar_cleanup_task.cancel()
+            try:
+                await self._avatar_cleanup_task
+            except asyncio.CancelledError:
+                pass
+            self._avatar_cleanup_task = None
         await self._stop_all_telegram_listeners()
         await self.xmpp.stop()
 
@@ -177,12 +190,33 @@ class TelegramTransport:
                     mime_type=cached_avatar.mime_type,
                     bytes_count=cached_avatar.bytes_count,
                 )
+        elif not contact.avatar_download_failed:
+            await self.repository.delete_contact_avatar(xmpp_jid, contact_jid)
+        if contact.avatar_download_failed:
+            return
         await self.repository.set_synced_roster_item_signature(
             xmpp_jid,
             contact_jid,
             "contact",
             sync_signature,
         )
+
+    async def _avatar_cleanup_loop(self) -> None:
+        interval = max(self.settings.avatar_cleanup_interval_seconds, 1)
+        ttl_days = max(self.settings.avatar_unreferenced_ttl_days, 0)
+        while not self._stopped.is_set():
+            try:
+                removed = await self.avatar_cache.cleanup_unreferenced(self.repository, ttl_days)
+                if removed:
+                    log.info("Removed %s unreferenced Telegram avatar cache file(s)", removed)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("Telegram avatar cache cleanup failed")
+            try:
+                await asyncio.wait_for(self._stopped.wait(), timeout=interval)
+            except asyncio.TimeoutError:
+                continue
 
     async def _ensure_telegram_group_chat(self, xmpp_jid: str, chat: TelegramDialog) -> None:
         group_jid = self._group_jid(str(chat.peer_id), xmpp_jid)

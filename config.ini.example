@@ -34,6 +34,9 @@ qr_base_url = http://127.0.0.1:8089
 avatar_storage_dir = data/avatars
 # Public base URL for this transport HTTP listener. /avatar/<hash>.jpg is appended.
 avatar_base_url = http://127.0.0.1:8089
+avatar_max_bytes = 524288
+avatar_unreferenced_ttl_days = 7
+avatar_cleanup_interval_seconds = 86400
 
 [logging]
 level = INFO

@@ -51,12 +51,14 @@ class TelegramBackend:
         result = await client(GetContactsRequest(hash=0))
         for user in getattr(result, "users", []):
             peer_id = int(user.id)
+            avatar, avatar_download_failed = await self._small_user_avatar(client, user)
             contacts_by_peer_id[peer_id] = TelegramContact(
                 peer_id=peer_id,
                 title=self._user_title(user),
                 username=getattr(user, "username", None),
                 phone=getattr(user, "phone", None),
-                avatar=await self._small_user_avatar(client, user),
+                avatar=avatar,
+                avatar_download_failed=avatar_download_failed,
             )
 
         async for dialog in client.iter_dialogs():
@@ -67,12 +69,14 @@ class TelegramBackend:
             if peer_id in contacts_by_peer_id:
                 continue
             title = dialog.name or self._user_title(entity)
+            avatar, avatar_download_failed = await self._small_user_avatar(client, entity)
             contacts_by_peer_id[peer_id] = TelegramContact(
                 peer_id=peer_id,
                 title=title,
                 username=getattr(entity, "username", None),
                 phone=getattr(entity, "phone", None),
-                avatar=await self._small_user_avatar(client, entity),
+                avatar=avatar,
+                avatar_download_failed=avatar_download_failed,
             )
         return sorted(contacts_by_peer_id.values(), key=lambda contact: contact.title.lower())
 
@@ -223,11 +227,11 @@ class TelegramBackend:
             return "+%s" % phone
         return str(getattr(user, "id", "unknown"))
 
-    async def _small_user_avatar(self, client: TelegramClient, user) -> Optional[TelegramAvatar]:
+    async def _small_user_avatar(self, client: TelegramClient, user):
         photo = getattr(user, "photo", None)
         photo_id = getattr(photo, "photo_id", None)
         if photo_id is None:
-            return None
+            return None, False
         try:
             content = await client.download_profile_photo(user, file=bytes, download_big=False)
         except Exception:
@@ -237,7 +241,7 @@ class TelegramBackend:
                 photo_id,
                 exc_info=True,
             )
-            return None
+            return None, True
         if not content:
-            return None
-        return TelegramAvatar(photo_id=str(photo_id), content=content)
+            return None, True
+        return TelegramAvatar(photo_id=str(photo_id), content=content), False

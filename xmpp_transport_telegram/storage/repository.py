@@ -336,6 +336,54 @@ class Repository:
                 bytes_count,
             )
 
+    async def get_avatar_file(self, content_hash: str):
+        if self.pool is None:
+            raise RuntimeError("Repository is not connected")
+        async with self.pool.acquire() as connection:
+            return await connection.fetchrow(
+                """
+                UPDATE telegram_avatar_files
+                SET accessed_at = now()
+                WHERE content_hash = $1
+                RETURNING relative_path, mime_type, bytes_count
+                """,
+                content_hash,
+            )
+
+    async def delete_avatar_file(self, content_hash: str) -> None:
+        if self.pool is None:
+            raise RuntimeError("Repository is not connected")
+        async with self.pool.acquire() as connection:
+            await connection.execute(
+                """
+                DELETE FROM telegram_avatar_files
+                WHERE content_hash = $1
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM telegram_contact_avatars
+                    WHERE telegram_contact_avatars.content_hash = telegram_avatar_files.content_hash
+                )
+                """,
+                content_hash,
+            )
+
+    async def list_unreferenced_avatar_files(self, ttl_days: int):
+        if self.pool is None:
+            raise RuntimeError("Repository is not connected")
+        async with self.pool.acquire() as connection:
+            return await connection.fetch(
+                """
+                SELECT files.content_hash, files.relative_path
+                FROM telegram_avatar_files AS files
+                LEFT JOIN telegram_contact_avatars AS avatars
+                    ON avatars.content_hash = files.content_hash
+                WHERE avatars.id IS NULL
+                    AND files.accessed_at < now() - make_interval(days => $1)
+                ORDER BY files.accessed_at
+                """,
+                ttl_days,
+            )
+
     async def upsert_contact_avatar(
         self,
         owner_jid: str,
@@ -388,4 +436,20 @@ class Repository:
                 url,
                 mime_type,
                 bytes_count,
+            )
+
+    async def delete_contact_avatar(self, owner_jid: str, contact_jid: str, variant: str = "small") -> None:
+        if self.pool is None:
+            raise RuntimeError("Repository is not connected")
+        async with self.pool.acquire() as connection:
+            await connection.execute(
+                """
+                DELETE FROM telegram_contact_avatars
+                WHERE owner_jid = $1
+                    AND contact_jid = $2
+                    AND variant = $3
+                """,
+                owner_jid,
+                contact_jid,
+                variant,
             )

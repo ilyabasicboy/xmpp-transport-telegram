@@ -30,3 +30,6 @@ api_hash = hash
     assert settings.qr_base_url == "http://127.0.0.1:8089"
     assert settings.avatar_storage_dir == "data/avatars"
     assert settings.avatar_base_url == "http://127.0.0.1:8089"
+    assert settings.avatar_max_bytes == 524288
+    assert settings.avatar_unreferenced_ttl_days == 7
+    assert settings.avatar_cleanup_interval_seconds == 86400

@@ -43,6 +43,7 @@ class FakeClient:
         self.sent_messages = []
         self.forwarded_messages = []
         self.profile_photo_downloads = []
+        self.fail_profile_photo_download = False
 
     async def __call__(self, request):
         return type("FakeContactsResult", (), {"users": list(self.users)})()
@@ -61,6 +62,8 @@ class FakeClient:
 
     async def download_profile_photo(self, entity, file=None, download_big=True):
         self.profile_photo_downloads.append((entity, file, download_big))
+        if self.fail_profile_photo_download:
+            raise RuntimeError("download failed")
         return b"avatar"
 
 
@@ -111,6 +114,23 @@ async def _test_list_contacts_downloads_small_avatar_from_user_photo():
     assert contacts[0].avatar.content == b"avatar"
     assert contacts[0].avatar.variant == "small"
     assert client.profile_photo_downloads == [(user, bytes, False)]
+
+
+def test_list_contacts_marks_avatar_download_failure():
+    asyncio.run(_test_list_contacts_marks_avatar_download_failure())
+
+
+async def _test_list_contacts_marks_avatar_download_failure():
+    backend = TelegramBackend(_settings())
+    photo = type("FakePhoto", (), {"photo_id": 12345})()
+    user = FakeEntity(user_id=100, first_name="Alice", photo=photo)
+    client = FakeClient([], [user])
+    client.fail_profile_photo_download = True
+
+    contacts = await backend.list_contacts(client)
+
+    assert contacts[0].avatar is None
+    assert contacts[0].avatar_download_failed
 
 
 def test_send_direct_message_resolves_private_dialog_entity():
@@ -281,6 +301,9 @@ def _settings():
         qr_base_url="http://127.0.0.1:8089",
         avatar_storage_dir="data/avatars",
         avatar_base_url="http://127.0.0.1:8089",
+        avatar_max_bytes=524288,
+        avatar_unreferenced_ttl_days=7,
+        avatar_cleanup_interval_seconds=86400,
         log_level="INFO",
         log_file="",
         log_max_bytes=10485760,

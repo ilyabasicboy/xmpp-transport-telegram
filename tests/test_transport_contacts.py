@@ -17,6 +17,7 @@ class FakeRepository:
         self.connected_sessions = []
         self.avatar_files = {}
         self.contact_avatars = {}
+        self.deleted_contact_avatars = []
 
     async def get_synced_roster_item_signature(self, xmpp_jid, item_jid):
         return self.signatures.get((xmpp_jid, item_jid))
@@ -62,6 +63,10 @@ class FakeRepository:
             "mime_type": mime_type,
             "bytes_count": bytes_count,
         }
+
+    async def delete_contact_avatar(self, owner_jid, contact_jid, variant="small"):
+        self.deleted_contact_avatars.append((owner_jid, contact_jid, variant))
+        self.contact_avatars.pop((owner_jid, contact_jid, variant), None)
 
 
 class FakeSession:
@@ -185,6 +190,7 @@ async def _test_ensure_telegram_contact_caches_avatar_by_content_hash(tmp_path):
             **settings.__dict__,
             "avatar_storage_dir": str(tmp_path / "avatars"),
             "avatar_base_url": "http://transport.example",
+            "avatar_max_bytes": 524288,
         }
     )
     repository = FakeRepository()
@@ -219,6 +225,76 @@ async def _test_ensure_telegram_contact_caches_avatar_by_content_hash(tmp_path):
         ("second@example.com", "chat-200@telegram.example.com", "small")
     ]["content_hash"] == content_hash
     assert transport.xmpp.client.avatar_events[0]["url"] == "http://transport.example/avatar/%s.jpg" % content_hash
+
+
+def test_ensure_telegram_contact_removes_avatar_metadata_without_photo():
+    asyncio.run(_test_ensure_telegram_contact_removes_avatar_metadata_without_photo())
+
+
+async def _test_ensure_telegram_contact_removes_avatar_metadata_without_photo():
+    repository = FakeRepository()
+    repository.contact_avatars[("user@example.com", "chat-100@telegram.example.com", "small")] = {}
+    transport = TelegramTransport(_settings(), repository)
+    transport.xmpp = FakeXmpp()
+
+    await transport._ensure_telegram_contact("user@example.com", TelegramContact(peer_id=100, title="Alice"))
+
+    assert repository.deleted_contact_avatars == [
+        ("user@example.com", "chat-100@telegram.example.com", "small")
+    ]
+
+
+def test_ensure_telegram_contact_keeps_avatar_metadata_after_download_failure():
+    asyncio.run(_test_ensure_telegram_contact_keeps_avatar_metadata_after_download_failure())
+
+
+async def _test_ensure_telegram_contact_keeps_avatar_metadata_after_download_failure():
+    repository = FakeRepository()
+    old_signature = "old-avatar-signature"
+    repository.signatures[("user@example.com", "chat-100@telegram.example.com")] = old_signature
+    transport = TelegramTransport(_settings(), repository)
+    transport.xmpp = FakeXmpp()
+
+    await transport._ensure_telegram_contact(
+        "user@example.com",
+        TelegramContact(peer_id=100, title="Alice", avatar_download_failed=True),
+    )
+
+    assert repository.deleted_contact_avatars == []
+    assert repository.signatures[("user@example.com", "chat-100@telegram.example.com")] == old_signature
+
+
+def test_ensure_telegram_contact_rejects_oversized_avatar(tmp_path):
+    asyncio.run(_test_ensure_telegram_contact_rejects_oversized_avatar(tmp_path))
+
+
+async def _test_ensure_telegram_contact_rejects_oversized_avatar(tmp_path):
+    settings = _settings()
+    settings = Settings(
+        **{
+            **settings.__dict__,
+            "avatar_storage_dir": str(tmp_path / "avatars"),
+            "avatar_max_bytes": 4,
+        }
+    )
+    repository = FakeRepository()
+    transport = TelegramTransport(settings, repository)
+    transport.xmpp = FakeXmpp()
+
+    await transport._ensure_telegram_contact(
+        "user@example.com",
+        TelegramContact(
+            peer_id=100,
+            title="Alice",
+            avatar=TelegramAvatar(photo_id="111", content=b"too-large"),
+        ),
+    )
+
+    assert not repository.avatar_files
+    assert not list((tmp_path / "avatars").glob("*"))
+    assert repository.deleted_contact_avatars == [
+        ("user@example.com", "chat-100@telegram.example.com", "small")
+    ]
 
 
 def test_restart_sync_pushes_contacts_for_connected_sessions():
@@ -368,6 +444,9 @@ def _settings():
         qr_base_url="http://127.0.0.1:8089",
         avatar_storage_dir="data/avatars",
         avatar_base_url="http://127.0.0.1:8089",
+        avatar_max_bytes=524288,
+        avatar_unreferenced_ttl_days=7,
+        avatar_cleanup_interval_seconds=86400,
         log_level="INFO",
         log_file="",
         log_max_bytes=10485760,

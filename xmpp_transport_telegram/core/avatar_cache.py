@@ -1,10 +1,14 @@
 import hashlib
+import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
 from xmpp_transport_telegram.telegram.models import TelegramAvatar
+
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -17,9 +21,10 @@ class CachedAvatar:
 
 
 class AvatarCache:
-    def __init__(self, storage_dir: str, base_url: str) -> None:
+    def __init__(self, storage_dir: str, base_url: str, max_bytes: int) -> None:
         self.storage_dir = Path(storage_dir)
         self.base_url = base_url.rstrip("/")
+        self.max_bytes = max_bytes
 
     async def store(
         self,
@@ -31,6 +36,18 @@ class AvatarCache:
         avatar: TelegramAvatar,
     ) -> Optional[CachedAvatar]:
         if not avatar.content:
+            return None
+        if len(avatar.content) > self.max_bytes:
+            log.warning(
+                "Skipping oversized Telegram avatar owner=%s contact=%s peer_id=%s photo_id=%s bytes=%s max=%s",
+                owner_jid,
+                contact_jid,
+                peer_id,
+                avatar.photo_id,
+                len(avatar.content),
+                self.max_bytes,
+            )
+            await repository.delete_contact_avatar(owner_jid, contact_jid, avatar.variant)
             return None
         content_hash = hashlib.sha256(avatar.content).hexdigest()
         filename = "%s.jpg" % content_hash
@@ -80,3 +97,21 @@ class AvatarCache:
         finally:
             if tmp_path.exists():
                 tmp_path.unlink()
+
+    async def cleanup_unreferenced(self, repository, ttl_days: int) -> int:
+        removed = 0
+        files = await repository.list_unreferenced_avatar_files(ttl_days)
+        for row in files:
+            content_hash = row["content_hash"]
+            relative_path = row["relative_path"]
+            path = self.storage_dir / relative_path
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                log.warning("Could not remove unreferenced Telegram avatar file %s", path, exc_info=True)
+                continue
+            await repository.delete_avatar_file(content_hash)
+            removed += 1
+        return removed

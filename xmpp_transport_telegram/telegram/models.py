@@ -27,6 +27,7 @@ class TelegramContact:
     username: Optional[str] = None
     phone: Optional[str] = None
     avatar: Optional[TelegramAvatar] = None
+    avatar_download_failed: bool = False
 
 
 @dataclass(frozen=True)

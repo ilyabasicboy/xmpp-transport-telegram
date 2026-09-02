@@ -42,6 +42,9 @@ class Settings:
     qr_base_url: str
     avatar_storage_dir: str
     avatar_base_url: str
+    avatar_max_bytes: int
+    avatar_unreferenced_ttl_days: int
+    avatar_cleanup_interval_seconds: int
     log_level: str
     log_file: str
     log_max_bytes: int
@@ -90,6 +93,9 @@ def load_settings(config_path: str = DEFAULT_CONFIG_PATH) -> Settings:
         qr_base_url=qr_base_url.rstrip("/"),
         avatar_storage_dir=config.get("server", "avatar_storage_dir", fallback="data/avatars"),
         avatar_base_url=config.get("server", "avatar_base_url", fallback=qr_base_url).rstrip("/"),
+        avatar_max_bytes=config.getint("server", "avatar_max_bytes", fallback=524288),
+        avatar_unreferenced_ttl_days=config.getint("server", "avatar_unreferenced_ttl_days", fallback=7),
+        avatar_cleanup_interval_seconds=config.getint("server", "avatar_cleanup_interval_seconds", fallback=86400),
         log_level=config.get("logging", "level", fallback="INFO"),
         log_file=config.get("logging", "file", fallback="logs/xmpp_transport_telegram.log"),
         log_max_bytes=config.getint("logging", "max_bytes", fallback=10485760),
