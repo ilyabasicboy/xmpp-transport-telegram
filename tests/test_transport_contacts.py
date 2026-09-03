@@ -298,6 +298,48 @@ async def _test_ensure_telegram_contact_rejects_oversized_avatar(tmp_path):
     ]
 
 
+def test_ensure_telegram_group_chat_caches_avatar(tmp_path):
+    asyncio.run(_test_ensure_telegram_group_chat_caches_avatar(tmp_path))
+
+
+async def _test_ensure_telegram_group_chat_caches_avatar(tmp_path):
+    settings = _settings()
+    settings = Settings(
+        **{
+            **settings.__dict__,
+            "avatar_storage_dir": str(tmp_path / "avatars"),
+            "avatar_base_url": "http://transport.example",
+        }
+    )
+    repository = FakeRepository()
+    transport = TelegramTransport(settings, repository)
+    transport.xmpp = FakeXmpp()
+    content = b"group-avatar"
+    content_hash = hashlib.sha256(content).hexdigest()
+    chat = TelegramDialog(
+        peer_id=-100500,
+        title="Team",
+        is_group=True,
+        avatar=TelegramAvatar(photo_id="777", content=content),
+    )
+    group_jid = "telegramg-75736572406578616d706c652e636f6d--100500@example.com"
+
+    await transport._ensure_telegram_group_chat("user@example.com", chat)
+
+    assert (tmp_path / "avatars" / ("%s.jpg" % content_hash)).read_bytes() == content
+    assert repository.contact_avatars[("user@example.com", group_jid, "small")]["content_hash"] == content_hash
+    assert transport.xmpp.client.avatar_events == [
+        {
+            "sender": group_jid,
+            "recipient": "user@example.com",
+            "avatar_id": "telegram--100500-777-%s" % content_hash[:16],
+            "url": "http://transport.example/avatar/%s.jpg" % content_hash,
+            "mime_type": "image/jpeg",
+            "bytes_count": len(content),
+        }
+    ]
+
+
 def test_restart_sync_pushes_contacts_for_connected_sessions():
     asyncio.run(_test_restart_sync_pushes_contacts_for_connected_sessions())
 

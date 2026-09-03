@@ -11,7 +11,7 @@ from xmpp_transport_telegram.core.state import DirectReplyContext
 from xmpp_transport_telegram.core import transport as transport_module
 from xmpp_transport_telegram.core.transport import TelegramTransport
 from xmpp_transport_telegram.runtime.config import Settings
-from xmpp_transport_telegram.telegram.models import TelegramDialog
+from xmpp_transport_telegram.telegram.models import TelegramAvatar, TelegramDialog
 from xmpp_transport_telegram.xmpp.models import XmppForwardReference, XmppIncomingMessage, XmppOutgoingMedia
 
 
@@ -21,6 +21,9 @@ class FakeRepository:
         self.session = None
         self.signatures = {}
         self.media_refs = {}
+        self.avatar_files = {}
+        self.contact_avatars = {}
+        self.deleted_contact_avatars = []
 
     async def ensure_xmpp_account(self, xmpp_jid):
         return self.account_id
@@ -76,6 +79,40 @@ class FakeRepository:
     async def get_media_reference(self, token):
         return self.media_refs.get(token)
 
+    async def upsert_avatar_file(self, content_hash, relative_path, mime_type, bytes_count):
+        self.avatar_files[content_hash] = {
+            "relative_path": relative_path,
+            "mime_type": mime_type,
+            "bytes_count": bytes_count,
+        }
+
+    async def upsert_contact_avatar(
+        self,
+        owner_jid,
+        contact_jid,
+        peer_id,
+        photo_id,
+        variant,
+        content_hash,
+        avatar_id,
+        url,
+        mime_type,
+        bytes_count,
+    ):
+        self.contact_avatars[(owner_jid, contact_jid, variant)] = {
+            "peer_id": peer_id,
+            "photo_id": photo_id,
+            "content_hash": content_hash,
+            "avatar_id": avatar_id,
+            "url": url,
+            "mime_type": mime_type,
+            "bytes_count": bytes_count,
+        }
+
+    async def delete_contact_avatar(self, owner_jid, contact_jid, variant="small"):
+        self.deleted_contact_avatars.append((owner_jid, contact_jid, variant))
+        self.contact_avatars.pop((owner_jid, contact_jid, variant), None)
+
 
 class FakeTelegramClient:
     def __init__(self, authorized=True):
@@ -86,6 +123,7 @@ class FakeTelegramClient:
         self.handlers = []
         self.messages = {}
         self.downloaded_media = []
+        self.profile_photo_downloads = []
 
     async def connect(self):
         self.connected = True
@@ -117,6 +155,10 @@ class FakeTelegramClient:
 
     def add_event_handler(self, handler, event_builder):
         self.handlers.append((handler, event_builder))
+
+    async def download_profile_photo(self, entity, file=None, download_big=True):
+        self.profile_photo_downloads.append((entity, file, download_big))
+        return b"group-avatar"
 
 
 class FakeTelegramBackend:
@@ -186,6 +228,7 @@ class FakeXmppClient:
         self.invites = []
         self.direct_invites = []
         self.group_joins = []
+        self.avatar_events = []
         self.bot_jid = "bot@telegram.example.com"
         self.invite_error = None
 
@@ -229,6 +272,9 @@ class FakeXmppClient:
     def join_xabber_group(self, **kwargs):
         self.group_joins.append(kwargs)
 
+    def send_avatar_metadata_event(self, **kwargs):
+        self.avatar_events.append(kwargs)
+
     def parse_component_localpart(self, jid):
         suffix = "@telegram.example.com"
         if not jid.endswith(suffix):
@@ -269,6 +315,7 @@ class FakeEvent:
         file_info=None,
         photo=None,
         date=None,
+        chat_photo=None,
     ):
         self.chat_id = chat_id
         self.raw_text = raw_text
@@ -284,6 +331,7 @@ class FakeEvent:
         self.sender_last_name = sender_last_name
         self.sender_username = sender_username
         self.date = date
+        self.chat_photo = chat_photo
         self.message = type(
             "FakeEventMessage",
             (),
@@ -299,7 +347,7 @@ class FakeEvent:
         )()
 
     async def get_chat(self):
-        return type("FakeChatEntity", (), {"title": self.title})()
+        return type("FakeChatEntity", (), {"id": self.chat_id, "title": self.title, "photo": self.chat_photo})()
 
     async def get_sender(self):
         return type(
@@ -873,6 +921,10 @@ def test_incoming_telegram_group_message_sends_to_xabber_group():
     asyncio.run(_test_incoming_telegram_group_message_sends_to_xabber_group())
 
 
+def test_incoming_telegram_group_message_syncs_group_avatar(tmp_path):
+    asyncio.run(_test_incoming_telegram_group_message_syncs_group_avatar(tmp_path))
+
+
 async def _test_incoming_telegram_group_message_sends_to_xabber_group():
     repository = FakeRepository()
     transport = TelegramTransport(_settings(), repository)
@@ -937,6 +989,42 @@ async def _test_incoming_telegram_group_message_sends_to_xabber_group():
             "fake_outgoing": True,
         }
     ]
+
+
+async def _test_incoming_telegram_group_message_syncs_group_avatar(tmp_path):
+    settings = _settings()
+    settings = Settings(
+        **{
+            **settings.__dict__,
+            "avatar_storage_dir": str(tmp_path / "avatars"),
+            "avatar_base_url": "http://transport.example",
+        }
+    )
+    repository = FakeRepository()
+    transport = TelegramTransport(settings, repository)
+    transport.xmpp = FakeXmpp()
+    client = FakeTelegramClient()
+    transport._telegram_clients["user@example.com"] = client
+    chat_photo = type("FakePhoto", (), {"photo_id": 777})()
+    group_jid = "telegramg-75736572406578616d706c652e636f6d--100500@example.com"
+
+    await transport._handle_incoming_telegram_message(
+        "user@example.com",
+        FakeEvent(
+            chat_id=-100500,
+            raw_text="hello xabber group",
+            is_private=False,
+            sender_id=200,
+            message_id=902,
+            title="Telegram Team",
+            chat_photo=chat_photo,
+        ),
+    )
+
+    assert client.profile_photo_downloads[0][1:] == (bytes, False)
+    assert transport.xmpp.client.avatar_events[0]["sender"] == group_jid
+    assert transport.xmpp.client.avatar_events[0]["recipient"] == "user@example.com"
+    assert transport.xmpp.client.avatar_events[0]["url"].startswith("http://transport.example/avatar/")
 
 
 def test_outgoing_telegram_group_message_sends_to_xabber_group_as_owner():
@@ -1022,7 +1110,7 @@ def test_incoming_telegram_group_message_does_not_create_existing_xabber_group()
 async def _test_incoming_telegram_group_message_does_not_create_existing_xabber_group():
     repository = FakeRepository()
     group_jid = "telegramg-75736572406578616d706c652e636f6d--100500@example.com"
-    repository.signatures[("user@example.com", group_jid)] = "Telegram Team\nTrue\nFalse"
+    repository.signatures[("user@example.com", group_jid)] = "Telegram Team\nTrue\nFalse\n\n"
     transport = TelegramTransport(_settings(), repository)
     transport.xmpp = FakeXmpp()
 
@@ -1076,7 +1164,7 @@ def test_existing_xabber_group_already_invited_owner_still_sends_direct_invite()
 async def _test_existing_xabber_group_already_invited_owner_still_sends_direct_invite():
     repository = FakeRepository()
     group_jid = "telegramg-75736572406578616d706c652e636f6d--100600@example.com"
-    repository.signatures[("user@example.com", group_jid)] = "Telegram Public\nTrue\nFalse"
+    repository.signatures[("user@example.com", group_jid)] = "Telegram Public\nTrue\nTrue\n\n"
     transport = TelegramTransport(_settings(), repository)
     transport.xmpp = FakeXmpp()
     error_xml = _already_invited_error_xml()
@@ -1114,7 +1202,7 @@ def test_already_invited_telegram_group_sender_is_auto_joined_before_message():
 async def _test_already_invited_telegram_group_sender_is_auto_joined_before_message():
     repository = FakeRepository()
     group_jid = "telegramg-75736572406578616d706c652e636f6d--5386493808@example.com"
-    repository.signatures[("user@example.com", group_jid)] = "Test\nTrue\nFalse"
+    repository.signatures[("user@example.com", group_jid)] = "Test\nTrue\nFalse\n\n"
     transport = TelegramTransport(_settings(), repository)
     transport.xmpp = FakeXmpp()
     transport._group_protocol_members.add(("user@example.com", group_jid, "user@example.com"))
@@ -1320,7 +1408,7 @@ async def _test_xabber_group_forward_uses_telegram_native_forward():
 async def _test_incoming_telegram_group_reply_sends_xabber_reply_reference():
     repository = FakeRepository()
     group_jid = "telegramg-75736572406578616d706c652e636f6d--100500@example.com"
-    repository.signatures[("user@example.com", group_jid)] = "Telegram Team\nTrue\nFalse"
+    repository.signatures[("user@example.com", group_jid)] = "Telegram Team\nTrue\nFalse\n\n"
     transport = TelegramTransport(_settings(), repository)
     transport.xmpp = FakeXmpp()
     transport._remember_group_reply_context(
@@ -1358,7 +1446,7 @@ async def _test_incoming_telegram_group_reply_sends_xabber_reply_reference():
 async def _test_incoming_telegram_group_forward_sends_xabber_forward_reference():
     repository = FakeRepository()
     group_jid = "telegramg-75736572406578616d706c652e636f6d--100500@example.com"
-    repository.signatures[("user@example.com", group_jid)] = "Telegram Team\nTrue\nFalse"
+    repository.signatures[("user@example.com", group_jid)] = "Telegram Team\nTrue\nFalse\n\n"
     transport = TelegramTransport(_settings(), repository)
     transport.xmpp = FakeXmpp()
 

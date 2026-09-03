@@ -60,7 +60,7 @@ class TelegramBackend:
         result = await client(GetContactsRequest(hash=0))
         for user in getattr(result, "users", []):
             peer_id = int(user.id)
-            avatar, avatar_photo_id, avatar_download_failed = await self._small_user_avatar(
+            avatar, avatar_photo_id, avatar_download_failed = await self.small_avatar(
                 client,
                 user,
                 include_content=include_avatars,
@@ -83,7 +83,7 @@ class TelegramBackend:
             if peer_id in contacts_by_peer_id:
                 continue
             title = dialog.name or self._user_title(entity)
-            avatar, avatar_photo_id, avatar_download_failed = await self._small_user_avatar(
+            avatar, avatar_photo_id, avatar_download_failed = await self.small_avatar(
                 client,
                 entity,
                 include_content=include_avatars,
@@ -99,12 +99,17 @@ class TelegramBackend:
             )
         return sorted(contacts_by_peer_id.values(), key=lambda contact: contact.title.lower())
 
-    async def list_group_chats(self, client: TelegramClient) -> List[TelegramDialog]:
+    async def list_group_chats(self, client: TelegramClient, include_avatars: bool = True) -> List[TelegramDialog]:
         groups = []
         async for dialog in client.iter_dialogs():
             if not bool(getattr(dialog, "is_group", False)) and not bool(getattr(dialog, "is_channel", False)):
                 continue
             entity = dialog.entity
+            avatar, avatar_photo_id, avatar_download_failed = await self.small_avatar(
+                client,
+                entity,
+                include_content=include_avatars,
+            )
             groups.append(
                 TelegramDialog(
                     peer_id=int(dialog.id),
@@ -113,6 +118,9 @@ class TelegramBackend:
                     phone=getattr(entity, "phone", None),
                     is_group=bool(getattr(dialog, "is_group", False)),
                     is_channel=bool(getattr(dialog, "is_channel", False)),
+                    avatar=avatar,
+                    avatar_photo_id=avatar_photo_id,
+                    avatar_download_failed=avatar_download_failed,
                 )
             )
         return sorted(groups, key=lambda group: group.title.lower())
@@ -436,8 +444,8 @@ class TelegramBackend:
             return "+%s" % phone
         return str(getattr(user, "id", "unknown"))
 
-    async def _small_user_avatar(self, client: TelegramClient, user, include_content: bool = True):
-        photo = getattr(user, "photo", None)
+    async def small_avatar(self, client: TelegramClient, entity, include_content: bool = True):
+        photo = getattr(entity, "photo", None)
         photo_id = getattr(photo, "photo_id", None)
         if photo_id is None:
             return None, None, False
@@ -445,11 +453,11 @@ class TelegramBackend:
         if not include_content:
             return None, photo_id, False
         try:
-            content = await client.download_profile_photo(user, file=bytes, download_big=False)
+            content = await client.download_profile_photo(entity, file=bytes, download_big=False)
         except Exception:
             log.debug(
                 "Could not download Telegram small avatar peer_id=%s photo_id=%s",
-                getattr(user, "id", "unknown"),
+                getattr(entity, "id", "unknown"),
                 photo_id,
                 exc_info=True,
             )

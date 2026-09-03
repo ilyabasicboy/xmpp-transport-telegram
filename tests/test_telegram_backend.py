@@ -316,6 +316,10 @@ def test_list_group_chats_returns_groups_and_channels():
     asyncio.run(_test_list_group_chats_returns_groups_and_channels())
 
 
+def test_list_group_chats_downloads_small_avatar_from_group_photo():
+    asyncio.run(_test_list_group_chats_downloads_small_avatar_from_group_photo())
+
+
 async def _test_list_group_chats_returns_groups_and_channels():
     backend = TelegramBackend(_settings())
     dialogs = [
@@ -330,6 +334,20 @@ async def _test_list_group_chats_returns_groups_and_channels():
         (-100600, "News", False, True),
         (-100500, "Team", True, False),
     ]
+
+
+async def _test_list_group_chats_downloads_small_avatar_from_group_photo():
+    backend = TelegramBackend(_settings())
+    photo = type("FakePhoto", (), {"photo_id": 777})()
+    group_entity = FakeEntity(user_id=-100500, username="team", photo=photo)
+    client = FakeClient([FakeDialog(-100500, "Team", group_entity, is_group=True)])
+
+    groups = await backend.list_group_chats(client)
+
+    assert groups[0].avatar.photo_id == "777"
+    assert groups[0].avatar.content == b"avatar"
+    assert groups[0].avatar_photo_id == "777"
+    assert client.profile_photo_downloads == [(group_entity, bytes, False)]
 
 
 def test_send_group_message_resolves_group_dialog_entity():

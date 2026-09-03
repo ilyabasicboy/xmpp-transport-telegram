@@ -300,6 +300,7 @@ class TelegramTransport:
             owner_jid=xmpp_jid,
             group_jid=group_jid,
         )
+        await self._sync_telegram_group_avatar(xmpp_jid, group_jid, chat)
         await self.repository.set_synced_roster_item_signature(
             xmpp_jid,
             group_jid,
@@ -307,6 +308,27 @@ class TelegramTransport:
             sync_signature,
         )
         self._group_ensure_signatures[group_key] = sync_signature
+
+    async def _sync_telegram_group_avatar(self, xmpp_jid: str, group_jid: str, chat: TelegramDialog) -> None:
+        if chat.avatar is not None:
+            cached_avatar = await self.avatar_cache.store(
+                self.repository,
+                owner_jid=xmpp_jid,
+                contact_jid=group_jid,
+                peer_id=chat.peer_id,
+                avatar=chat.avatar,
+            )
+            if cached_avatar is not None:
+                self.xmpp.client.send_avatar_metadata_event(
+                    sender=group_jid,
+                    recipient=xmpp_jid,
+                    avatar_id=cached_avatar.avatar_id,
+                    url=cached_avatar.url,
+                    mime_type=cached_avatar.mime_type,
+                    bytes_count=cached_avatar.bytes_count,
+                )
+        elif chat.avatar_photo_id is None and not chat.avatar_download_failed:
+            await self.repository.delete_contact_avatar(xmpp_jid, group_jid)
 
     async def _ensure_group_protocol_owner_member(self, owner_jid: str, group_jid: str) -> None:
         invited = await self._ensure_group_protocol_member(
@@ -625,7 +647,7 @@ class TelegramTransport:
         peer_id: int,
         body: str,
     ) -> None:
-        chat = await self._telegram_group_dialog_for_event(event, peer_id)
+        chat = await self._telegram_group_dialog_for_event(xmpp_jid, event, peer_id)
         await self._ensure_telegram_group_chat(xmpp_jid, chat)
         if getattr(event, "out", False):
             sender = self._group_transport_member_jid()
@@ -740,16 +762,30 @@ class TelegramTransport:
                     target_message_id=sent_message_id,
                 )
 
-    async def _telegram_group_dialog_for_event(self, event, peer_id: int) -> TelegramDialog:
+    async def _telegram_group_dialog_for_event(self, xmpp_jid: str, event, peer_id: int) -> TelegramDialog:
         title = None
+        chat_entity = None
         get_chat = getattr(event, "get_chat", None)
         if get_chat is not None:
             chat_entity = await get_chat()
             title = getattr(chat_entity, "title", None) or getattr(chat_entity, "username", None)
+        avatar = None
+        avatar_photo_id = None
+        avatar_download_failed = False
+        client = self._telegram_clients.get(xmpp_jid) or getattr(event, "client", None)
+        if client is not None and chat_entity is not None:
+            avatar, avatar_photo_id, avatar_download_failed = await self.telegram.small_avatar(
+                client,
+                chat_entity,
+            )
         return TelegramDialog(
             peer_id=peer_id,
             title=title or "Telegram group %s" % peer_id,
             is_group=True,
+            is_channel=bool(getattr(event, "is_channel", False)),
+            avatar=avatar,
+            avatar_photo_id=avatar_photo_id,
+            avatar_download_failed=avatar_download_failed,
         )
 
     def _bot_group_fanout_route(
@@ -1237,7 +1273,15 @@ class TelegramTransport:
 
     @staticmethod
     def _group_sync_signature(chat: TelegramDialog) -> str:
-        return "%s\n%s\n%s" % (chat.title, chat.is_group, chat.is_channel)
+        avatar_photo_id = chat.avatar.photo_id if chat.avatar is not None else chat.avatar_photo_id or ""
+        avatar_variant = chat.avatar.variant if chat.avatar is not None else "small" if chat.avatar_photo_id else ""
+        return "%s\n%s\n%s\n%s\n%s" % (
+            chat.title,
+            chat.is_group,
+            chat.is_channel,
+            avatar_photo_id,
+            avatar_variant,
+        )
 
     def _group_transport_member_jid(self) -> str:
         return "bot@%s" % self.settings.xmpp_component_jid

@@ -18,6 +18,9 @@ class TelegramDialog:
     phone: Optional[str] = None
     is_group: bool = False
     is_channel: bool = False
+    avatar: Optional[TelegramAvatar] = None
+    avatar_photo_id: Optional[str] = None
+    avatar_download_failed: bool = False
 
 
 @dataclass(frozen=True)
