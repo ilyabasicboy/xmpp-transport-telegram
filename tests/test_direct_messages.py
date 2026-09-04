@@ -991,7 +991,7 @@ async def _test_incoming_telegram_group_message_sends_to_xabber_group():
         {
             "sender": "chat-200@telegram.example.com",
             "group_jid": group_jid,
-            "body": "Alice Smith:\nhello group",
+            "body": "hello group",
             "message_id": "901",
             "reply_reference": None,
             "forward_references": (),
@@ -1165,7 +1165,7 @@ async def _test_incoming_telegram_group_message_does_not_create_existing_xabber_
             "nickname": "Telegram user 200",
         }
     ]
-    assert transport.xmpp.client.group_messages[0]["body"] == "Telegram user 200:\nhello existing group"
+    assert transport.xmpp.client.group_messages[0]["body"] == "hello existing group"
 
 
 def test_existing_xabber_group_already_invited_owner_still_sends_direct_invite():
@@ -1243,7 +1243,7 @@ async def _test_already_invited_telegram_group_sender_is_auto_joined_before_mess
         {
             "sender": "chat-356739513@telegram.example.com",
             "group_jid": group_jid,
-            "body": "member_name:\ntest123",
+            "body": "test123",
             "message_id": "178887",
             "reply_reference": None,
             "forward_references": (),
@@ -1262,6 +1262,10 @@ def test_xabber_group_reply_sends_telegram_reply_to_message_id():
 
 def test_xabber_group_structured_reply_strips_visible_quote_fallback():
     asyncio.run(_test_xabber_group_structured_reply_strips_visible_quote_fallback())
+
+
+def test_xabber_group_media_only_strips_sender_prefix():
+    asyncio.run(_test_xabber_group_media_only_strips_sender_prefix())
 
 
 def test_incoming_telegram_group_reply_sends_xabber_reply_reference():
@@ -1378,6 +1382,35 @@ async def _test_xabber_group_structured_reply_strips_visible_quote_fallback():
     assert transport.telegram.group_sent == [(-100500, "test", "910", None, ())]
 
 
+async def _test_xabber_group_media_only_strips_sender_prefix():
+    settings = _settings()
+    cipher = SessionCipher(settings.session_encryption_key)
+    repository = FakeRepository()
+    repository.session = {
+        "telegram_user_id": 42,
+        "phone": None,
+        "encrypted_session": cipher.encrypt("stored-session"),
+        "connected": True,
+    }
+    transport = TelegramTransport(settings, repository)
+    transport.telegram = FakeTelegramBackend()
+    transport.telegram.groups = [TelegramDialog(peer_id=-100500, title="Telegram Team", is_group=True)]
+    group_jid = "telegramg-7465737431406578616d706c652e636f6d--100500@example.com"
+    media = (XmppOutgoingMedia(url="https://xabber.example/gallery/photo.jpg", mime_type="image/jpeg"),)
+
+    await transport.send_direct_message(
+        XmppIncomingMessage(
+            sender=group_jid,
+            recipient="bot@telegram.example.com",
+            body="test1@example.com:",
+            media=media,
+            group_sender_jid="test1@example.com",
+        )
+    )
+
+    assert transport.telegram.group_sent == [(-100500, "", None, None, media)]
+
+
 async def _test_xabber_group_forward_uses_telegram_native_forward():
     settings = _settings()
     cipher = SessionCipher(settings.session_encryption_key)
@@ -1449,7 +1482,7 @@ async def _test_incoming_telegram_group_reply_sends_xabber_reply_reference():
 
     assert len(transport.xmpp.client.group_messages) == 1
     sent = transport.xmpp.client.group_messages[0]
-    assert sent["body"] == "Bob:\ngroup reply"
+    assert sent["body"] == "group reply"
     assert sent["reply_reference"] is not None
     assert sent["reply_reference"].message_id == "910"
 

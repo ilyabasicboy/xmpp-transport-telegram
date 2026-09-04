@@ -714,9 +714,7 @@ class TelegramTransport:
             event,
             fallback_recipient=self._group_jid(str(peer_id), xmpp_jid),
         )
-        if forward_reference is None and not getattr(event, "out", False):
-            body = self._format_group_body(sender_name, body)
-        elif forward_reference is not None:
+        if forward_reference is not None:
             body = ""
         context_body = forward_reference.body if forward_reference is not None else body
         message_id = self._incoming_telegram_message_id(event)
@@ -1369,10 +1367,6 @@ class TelegramTransport:
         return None
 
     @staticmethod
-    def _format_group_body(sender_name: str, body: str) -> str:
-        return "%s:\n%s" % (sender_name, body)
-
-    @staticmethod
     def _strip_xabber_group_sender_prefix(body: str, sender_jid: Optional[str]) -> str:
         if not sender_jid:
             return body
@@ -1380,6 +1374,7 @@ class TelegramTransport:
             "%s:\n" % sender_jid,
             "%s:\r\n" % sender_jid,
             "%s: " % sender_jid,
+            "%s:" % sender_jid,
         ]
         bare_name = sender_jid.split("@", 1)[0]
         prefixes.extend(
@@ -1387,6 +1382,7 @@ class TelegramTransport:
                 "%s:\n" % bare_name,
                 "%s:\r\n" % bare_name,
                 "%s: " % bare_name,
+                "%s:" % bare_name,
             ]
         )
         for prefix in prefixes:
