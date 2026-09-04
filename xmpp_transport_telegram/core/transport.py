@@ -7,7 +7,7 @@ from typing import Dict, Optional
 from urllib.parse import quote
 
 from aiohttp import web
-from telethon import events
+from telethon import events, types
 
 from xmpp_transport_telegram.core.avatar_cache import AvatarCache
 from xmpp_transport_telegram.core.commands import CommandService
@@ -360,14 +360,24 @@ class TelegramTransport:
                 avatar=chat.avatar,
             )
             if cached_avatar is not None:
-                self.xmpp.client.send_avatar_metadata_event(
-                    sender=group_jid,
-                    recipient=xmpp_jid,
-                    avatar_id=cached_avatar.avatar_id,
-                    url=cached_avatar.url,
-                    mime_type=cached_avatar.mime_type,
-                    bytes_count=cached_avatar.bytes_count,
-                )
+                try:
+                    await self.xmpp.client.update_xabber_group_avatar(
+                        owner_jid=xmpp_jid,
+                        actor_jid=self._group_transport_member_jid(),
+                        group_jid=group_jid,
+                        avatar_id=cached_avatar.avatar_id,
+                        url=cached_avatar.url,
+                        mime_type=cached_avatar.mime_type,
+                        bytes_count=cached_avatar.bytes_count,
+                        timeout=2,
+                    )
+                except Exception as exc:
+                    log.warning(
+                        "XEP-GROUPS avatar update failed; continuing Telegram group sync owner=%s group_jid=%s error=%s",
+                        xmpp_jid,
+                        group_jid,
+                        exc,
+                    )
         elif chat.avatar_photo_id is None and not chat.avatar_download_failed:
             await self.repository.delete_contact_avatar(xmpp_jid, group_jid)
 
@@ -606,12 +616,18 @@ class TelegramTransport:
         )
         is_outgoing = getattr(event, "out", False)
         is_group_chat = self._is_telegram_group_chat_event(event)
+        peer_id = self._peer_id_from_incoming_event(event)
+        if is_group_chat and self._is_telegram_group_avatar_update_event(event):
+            if peer_id is None:
+                log.debug("Ignoring Telegram group avatar update without peer id for %s", xmpp_jid)
+                return
+            await self._handle_telegram_group_avatar_update(xmpp_jid, event, int(peer_id))
+            return
         body = str(getattr(event, "raw_text", "") or "").strip()
         media = await self._media_reference_from_event(xmpp_jid, event)
         if not body and media is None:
             log.debug("Ignoring Telegram event without text body or media for %s", xmpp_jid)
             return
-        peer_id = self._peer_id_from_incoming_event(event)
         if peer_id is None:
             log.debug("Ignoring Telegram message without peer id for %s", xmpp_jid)
             return
@@ -681,6 +697,40 @@ class TelegramTransport:
             return True
         chat_id = getattr(event, "chat_id", None)
         return isinstance(chat_id, int) and chat_id < 0
+
+    @staticmethod
+    def _is_telegram_group_avatar_update_event(event) -> bool:
+        message = getattr(event, "message", None)
+        action = getattr(message, "action", None)
+        if action is None:
+            return False
+        if isinstance(action, (types.MessageActionChatEditPhoto, types.MessageActionChatDeletePhoto)):
+            return True
+        return action.__class__.__name__ in (
+            "MessageActionChatEditPhoto",
+            "MessageActionChatDeletePhoto",
+        )
+
+    async def _handle_telegram_group_avatar_update(self, xmpp_jid: str, event, peer_id: int) -> None:
+        group_jid = self._group_jid(str(peer_id), xmpp_jid)
+        stored_signature = await self.repository.get_synced_roster_item_signature(xmpp_jid, group_jid)
+        if stored_signature is None:
+            log.debug(
+                "Ignoring Telegram group avatar update for unsynced group xmpp_jid=%s group_id=%s",
+                xmpp_jid,
+                peer_id,
+            )
+            return
+        chat = await self._telegram_group_dialog_for_event(xmpp_jid, event, peer_id)
+        await self._sync_telegram_group_avatar(xmpp_jid, group_jid, chat)
+        if chat.avatar_download_failed:
+            return
+        await self.repository.set_synced_roster_item_signature(
+            xmpp_jid,
+            group_jid,
+            "group",
+            self._group_sync_signature(chat),
+        )
 
     async def _handle_incoming_telegram_group_message(
         self,

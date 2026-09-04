@@ -124,6 +124,7 @@ class FakeTelegramClient:
         self.messages = {}
         self.downloaded_media = []
         self.profile_photo_downloads = []
+        self.profile_photo_content = b"group-avatar"
 
     async def connect(self):
         self.connected = True
@@ -158,7 +159,7 @@ class FakeTelegramClient:
 
     async def download_profile_photo(self, entity, file=None, download_big=True):
         self.profile_photo_downloads.append((entity, file, download_big))
-        return b"group-avatar"
+        return self.profile_photo_content
 
 
 class FakeTelegramBackend:
@@ -237,6 +238,7 @@ class FakeXmppClient:
         self.avatar_events = []
         self.bot_jid = "bot@telegram.example.com"
         self.invite_error = None
+        self.group_avatar_error = None
 
     def send_direct_message(
         self,
@@ -265,6 +267,11 @@ class FakeXmppClient:
         return "%s@example.com" % kwargs["localpart"]
 
     async def update_xabber_group_info(self, **kwargs):
+        self.updated_groups.append(kwargs)
+
+    async def update_xabber_group_avatar(self, **kwargs):
+        if self.group_avatar_error is not None:
+            raise self.group_avatar_error
         self.updated_groups.append(kwargs)
 
     async def invite_xabber_group_member(self, **kwargs):
@@ -322,6 +329,7 @@ class FakeEvent:
         photo=None,
         date=None,
         chat_photo=None,
+        action=None,
     ):
         self.chat_id = chat_id
         self.raw_text = raw_text
@@ -349,6 +357,7 @@ class FakeEvent:
                 "file": file_info,
                 "photo": photo,
                 "date": date,
+                "action": action,
             },
         )()
 
@@ -932,6 +941,14 @@ def test_incoming_telegram_group_message_syncs_group_avatar(tmp_path):
     asyncio.run(_test_incoming_telegram_group_message_syncs_group_avatar(tmp_path))
 
 
+def test_telegram_group_avatar_change_event_updates_xabber_group_avatar(tmp_path):
+    asyncio.run(_test_telegram_group_avatar_change_event_updates_xabber_group_avatar(tmp_path))
+
+
+def test_group_avatar_update_failure_does_not_block_incoming_group_message(tmp_path):
+    asyncio.run(_test_group_avatar_update_failure_does_not_block_incoming_group_message(tmp_path))
+
+
 async def _test_incoming_telegram_group_message_sends_to_xabber_group():
     repository = FakeRepository()
     transport = TelegramTransport(_settings(), repository)
@@ -1031,9 +1048,126 @@ async def _test_incoming_telegram_group_message_syncs_group_avatar(tmp_path):
     )
 
     assert client.profile_photo_downloads[0][1:] == (bytes, False)
-    assert transport.xmpp.client.avatar_events[0]["sender"] == group_jid
-    assert transport.xmpp.client.avatar_events[0]["recipient"] == "user@example.com"
-    assert transport.xmpp.client.avatar_events[0]["url"].startswith("http://transport.example/avatar/")
+    assert transport.xmpp.client.updated_groups == [
+        {
+            "owner_jid": "user@example.com",
+            "actor_jid": "bot@telegram.example.com",
+            "group_jid": group_jid,
+            "avatar_id": repository.contact_avatars[
+                ("user@example.com", group_jid, "small")
+            ]["avatar_id"],
+            "url": repository.contact_avatars[
+                ("user@example.com", group_jid, "small")
+            ]["url"],
+            "mime_type": "image/jpeg",
+            "bytes_count": len(client.profile_photo_content),
+            "timeout": 2,
+        }
+    ]
+    assert transport.xmpp.client.updated_groups[0]["url"].startswith("http://transport.example/avatar/")
+    assert transport.xmpp.client.avatar_events == []
+
+
+async def _test_telegram_group_avatar_change_event_updates_xabber_group_avatar(tmp_path):
+    settings = _settings()
+    settings = Settings(
+        **{
+            **settings.__dict__,
+            "avatar_storage_dir": str(tmp_path / "avatars"),
+            "avatar_base_url": "http://transport.example",
+        }
+    )
+    repository = FakeRepository()
+    transport = TelegramTransport(settings, repository)
+    transport.xmpp = FakeXmpp()
+    client = FakeTelegramClient()
+    client.profile_photo_content = b"changed-group-avatar"
+    transport._telegram_clients["user@example.com"] = client
+    chat_photo = type("FakePhoto", (), {"photo_id": 888})()
+    action = type("MessageActionChatEditPhoto", (), {})()
+    group_jid = "telegramg-75736572406578616d706c652e636f6d--100500@example.com"
+    repository.signatures[("user@example.com", group_jid)] = "old-signature"
+
+    await transport._handle_incoming_telegram_message(
+        "user@example.com",
+        FakeEvent(
+            chat_id=-100500,
+            raw_text="",
+            is_private=False,
+            sender_id=200,
+            message_id=903,
+            title="Telegram Team",
+            chat_photo=chat_photo,
+            action=action,
+        ),
+    )
+
+    assert client.profile_photo_downloads[0][1:] == (bytes, False)
+    assert transport.xmpp.client.created_groups == []
+    assert transport.xmpp.client.group_messages == []
+    assert transport.xmpp.client.updated_groups == [
+        {
+            "owner_jid": "user@example.com",
+            "actor_jid": "bot@telegram.example.com",
+            "group_jid": group_jid,
+            "avatar_id": repository.contact_avatars[
+                ("user@example.com", group_jid, "small")
+            ]["avatar_id"],
+            "url": repository.contact_avatars[
+                ("user@example.com", group_jid, "small")
+            ]["url"],
+            "mime_type": "image/jpeg",
+            "bytes_count": len(client.profile_photo_content),
+            "timeout": 2,
+        }
+    ]
+    assert repository.signatures[("user@example.com", group_jid)] != "old-signature"
+
+
+async def _test_group_avatar_update_failure_does_not_block_incoming_group_message(tmp_path):
+    settings = _settings()
+    settings = Settings(
+        **{
+            **settings.__dict__,
+            "avatar_storage_dir": str(tmp_path / "avatars"),
+            "avatar_base_url": "http://transport.example",
+        }
+    )
+    repository = FakeRepository()
+    transport = TelegramTransport(settings, repository)
+    transport.xmpp = FakeXmpp()
+    transport.xmpp.client.group_avatar_error = RuntimeError("avatar update unsupported")
+    client = FakeTelegramClient()
+    transport._telegram_clients["user@example.com"] = client
+    chat_photo = type("FakePhoto", (), {"photo_id": 777})()
+    group_jid = "telegramg-75736572406578616d706c652e636f6d--100500@example.com"
+
+    await transport._handle_incoming_telegram_message(
+        "user@example.com",
+        FakeEvent(
+            chat_id=-100500,
+            raw_text="message after invite",
+            is_private=False,
+            sender_id=200,
+            message_id=904,
+            title="Telegram Team",
+            sender_first_name="Alice",
+            chat_photo=chat_photo,
+        ),
+    )
+
+    assert transport.xmpp.client.updated_groups == []
+    assert transport.xmpp.client.group_messages == [
+        {
+            "sender": "chat-200@telegram.example.com",
+            "group_jid": group_jid,
+            "body": "message after invite",
+            "message_id": "904",
+            "reply_reference": None,
+            "forward_references": (),
+            "fake_outgoing": True,
+        }
+    ]
 
 
 def test_outgoing_telegram_group_message_sends_to_xabber_group_as_owner():

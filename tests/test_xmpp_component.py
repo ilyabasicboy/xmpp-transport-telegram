@@ -5,6 +5,7 @@ from xmpp_transport_telegram.core.commands import ControlResponse
 from xmpp_transport_telegram.runtime.config import Settings
 from xmpp_transport_telegram.xmpp import component as component_module
 from xmpp_transport_telegram.xmpp.component import TelegramCommandComponent, XmppComponent
+from xmpp_transport_telegram.xmpp.groups_protocol import XabberGroupsXml
 from xmpp_transport_telegram.xmpp.namespaces import GROUPS_NS
 
 
@@ -94,6 +95,26 @@ def test_xmpp_component_start_retries_after_ready_timeout(monkeypatch):
         assert xmpp.client.connected is True
 
     asyncio.run(run_test())
+
+
+def test_xabber_group_info_update_can_include_external_avatar_metadata():
+    info = XabberGroupsXml.update_info(
+        avatar={
+            "bytes": 524288,
+            "id": "avatar-id",
+            "type": "image/jpeg",
+            "url": "http://transport.example/avatar/hash.jpg",
+        }
+    )
+
+    avatar = info.find("avatar")
+    assert avatar is not None
+    metadata = avatar.find("{urn:xmpp:avatar:metadata}info")
+    assert metadata is not None
+    assert metadata.attrib["id"] == "avatar-id"
+    assert metadata.attrib["url"] == "http://transport.example/avatar/hash.jpg"
+    assert metadata.attrib["bytes"] == "524288"
+    assert metadata.attrib["type"] == "image/jpeg"
 
 
 def test_xabber_group_service_message_to_bot_does_not_run_command_handler():

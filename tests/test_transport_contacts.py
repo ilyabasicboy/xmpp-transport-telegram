@@ -114,7 +114,7 @@ class FakeTelegramBackend:
         self.include_avatars = include_avatars
         return self.contacts
 
-    async def list_group_chats(self, client):
+    async def list_group_chats(self, client, include_avatars=True):
         return self.groups
 
 
@@ -136,6 +136,9 @@ class FakeXmppClient:
         return "%s@example.com" % kwargs["localpart"]
 
     async def update_xabber_group_info(self, **kwargs):
+        self.updated_groups.append(kwargs)
+
+    async def update_xabber_group_avatar(self, **kwargs):
         self.updated_groups.append(kwargs)
 
     async def invite_xabber_group_member(self, **kwargs):
@@ -328,16 +331,19 @@ async def _test_ensure_telegram_group_chat_caches_avatar(tmp_path):
 
     assert (tmp_path / "avatars" / ("%s.jpg" % content_hash)).read_bytes() == content
     assert repository.contact_avatars[("user@example.com", group_jid, "small")]["content_hash"] == content_hash
-    assert transport.xmpp.client.avatar_events == [
+    assert transport.xmpp.client.updated_groups == [
         {
-            "sender": group_jid,
-            "recipient": "user@example.com",
+            "owner_jid": "user@example.com",
+            "actor_jid": "bot@telegram.example.com",
+            "group_jid": group_jid,
             "avatar_id": "telegram--100500-777-%s" % content_hash[:16],
             "url": "http://transport.example/avatar/%s.jpg" % content_hash,
             "mime_type": "image/jpeg",
             "bytes_count": len(content),
+            "timeout": 2,
         }
     ]
+    assert transport.xmpp.client.avatar_events == []
 
 
 def test_restart_sync_pushes_contacts_for_connected_sessions():

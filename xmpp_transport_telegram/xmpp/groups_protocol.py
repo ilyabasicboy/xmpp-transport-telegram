@@ -5,6 +5,7 @@ from xmpp_transport_telegram.xmpp.namespaces import (
     CHAT_MARKERS_NS,
     GROUPS_NS,
     NICK_NS,
+    PUBSUB_AVATAR_METADATA_NS,
     SID_NS,
 )
 
@@ -39,11 +40,23 @@ class XabberGroupsXml:
         return create
 
     @staticmethod
-    def update_info(title: Optional[str] = None) -> ET.Element:
+    def update_info(title: Optional[str] = None, avatar: Optional[dict] = None) -> ET.Element:
         info = ET.Element("{%s}info" % GROUPS_NS)
         if title is not None:
             name = ET.SubElement(info, "name")
             name.text = title
+        if avatar is not None:
+            avatar_el = ET.SubElement(info, "avatar")
+            ET.SubElement(
+                avatar_el,
+                "{%s}info" % PUBSUB_AVATAR_METADATA_NS,
+                {
+                    "bytes": str(avatar["bytes"]),
+                    "id": str(avatar["id"]),
+                    "type": str(avatar["type"]),
+                    "url": str(avatar["url"]),
+                },
+            )
         return info
 
     @staticmethod

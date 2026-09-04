@@ -414,6 +414,32 @@ class TelegramCommandComponent(ComponentXMPP):
         )
         await iq.send(timeout=timeout)
 
+    async def update_xabber_group_avatar(
+        self,
+        owner_jid: str,
+        actor_jid: str,
+        group_jid: str,
+        avatar_id: str,
+        url: str,
+        mime_type: str,
+        bytes_count: int,
+        timeout: int = 10,
+    ) -> None:
+        del owner_jid
+        iq = self.make_iq_set(
+            sub=XabberGroupsXml.update_info(
+                avatar={
+                    "bytes": bytes_count,
+                    "id": avatar_id,
+                    "type": mime_type,
+                    "url": url,
+                }
+            ),
+            ito=group_jid,
+            ifrom=actor_jid,
+        )
+        await iq.send(timeout=timeout)
+
     async def invite_xabber_group_member(
         self,
         owner_jid: str,
