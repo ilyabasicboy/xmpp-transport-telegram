@@ -1,6 +1,8 @@
+import asyncio
 import logging
 import os
 import posixpath
+import shutil
 import tempfile
 from typing import List, Optional
 from urllib.parse import unquote, urlsplit
@@ -23,6 +25,7 @@ from xmpp_transport_telegram.telegram.models import (
 log = logging.getLogger(__name__)
 
 MAX_OUTGOING_MEDIA_BYTES = 50 * 1024 * 1024
+TELEGRAM_VOICE_MIME_TYPE = "audio/ogg"
 
 
 class TelegramBackend:
@@ -275,6 +278,17 @@ class TelegramBackend:
         media_items = [
             item for item in media if str(getattr(item, "url", "") or "").startswith(("http://", "https://"))
         ]
+        if len(media_items) == 1 and bool(getattr(media_items[0], "voice", False)):
+            sent = await self._send_downloaded_media_or_link_fallback(
+                client,
+                target_entity,
+                media_items,
+                body,
+                reply_to_message_id=reply_to_message_id,
+                voice_note=True,
+            )
+            message_id = getattr(sent, "id", None)
+            return str(message_id) if message_id is not None else None
         files = [item.url for item in media_items]
         if not media_items:
             if body:
@@ -316,6 +330,7 @@ class TelegramBackend:
         reply_to_message_id: Optional[str] = None,
         mime_type: Optional[str] = None,
         file_size: Optional[int] = None,
+        voice_note: bool = False,
     ):
         return await client.send_file(
             target_entity,
@@ -324,6 +339,7 @@ class TelegramBackend:
             reply_to=int(reply_to_message_id) if reply_to_message_id else None,
             mime_type=mime_type,
             file_size=file_size,
+            voice_note=voice_note,
         )
 
     async def _send_downloaded_media_or_link_fallback(
@@ -333,6 +349,7 @@ class TelegramBackend:
         media_items: list,
         body: str,
         reply_to_message_id: Optional[str] = None,
+        voice_note: bool = False,
     ):
         downloaded = []
         try:
@@ -347,6 +364,7 @@ class TelegramBackend:
                 reply_to_message_id=reply_to_message_id,
                 mime_type=first.get("mime_type"),
                 file_size=first.get("file_size"),
+                voice_note=voice_note,
             )
         except Exception:
             log.warning("Could not upload XMPP media URL to Telegram; sending link fallback", exc_info=True)
@@ -357,10 +375,11 @@ class TelegramBackend:
             )
         finally:
             for item in downloaded:
-                try:
-                    os.unlink(item["path"])
-                except OSError:
-                    log.debug("Could not remove temporary Telegram upload file %s", item["path"], exc_info=True)
+                for path in item.get("cleanup_paths", (item["path"],)):
+                    try:
+                        os.unlink(path)
+                    except OSError:
+                        log.debug("Could not remove temporary Telegram upload file %s", path, exc_info=True)
 
     async def _download_outgoing_media_files(self, media_items: list) -> list:
         downloaded = []
@@ -391,10 +410,27 @@ class TelegramBackend:
                 except OSError:
                     pass
                 raise
+        cleanup_paths = [path]
+        if bool(getattr(media, "voice", False)):
+            converted_path = self._temporary_voice_upload_path(media)
+            try:
+                await self._convert_xabber_voice_to_telegram(path, converted_path)
+            except Exception:
+                try:
+                    os.unlink(converted_path)
+                except OSError:
+                    pass
+                raise
+            path = converted_path
+            cleanup_paths.append(converted_path)
+            mime_type = TELEGRAM_VOICE_MIME_TYPE
+        else:
+            mime_type = str(getattr(media, "mime_type", "") or "") or None
         return {
             "path": path,
-            "file_size": size,
-            "mime_type": str(getattr(media, "mime_type", "") or "") or None,
+            "file_size": os.path.getsize(path),
+            "mime_type": mime_type,
+            "cleanup_paths": tuple(cleanup_paths),
         }
 
     @classmethod
@@ -408,6 +444,45 @@ class TelegramBackend:
         path = handle.name
         handle.close()
         return path
+
+    @classmethod
+    def _temporary_voice_upload_path(cls, media) -> str:
+        name = str(getattr(media, "name", "") or "").strip()
+        base = os.path.basename(name).rsplit(".", 1)[0] if name else "voice-message"
+        handle = tempfile.NamedTemporaryFile(
+            prefix="xmpp-telegram-voice-upload-",
+            suffix="-%s.ogg" % (base or "voice-message"),
+            delete=False,
+        )
+        path = handle.name
+        handle.close()
+        return path
+
+    @staticmethod
+    async def _convert_xabber_voice_to_telegram(source_path: str, target_path: str) -> None:
+        if shutil.which("ffmpeg") is None:
+            raise RuntimeError("ffmpeg is required to convert Xabber voice messages")
+        process = await asyncio.create_subprocess_exec(
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            source_path,
+            "-vn",
+            "-c:a",
+            "copy",
+            "-f",
+            "ogg",
+            target_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _stdout, stderr = await process.communicate()
+        if process.returncode != 0:
+            log.warning("Xabber voice conversion failed with ffmpeg status=%s stderr=%s", process.returncode, stderr[:500])
+            raise RuntimeError("Xabber voice conversion failed")
 
     @staticmethod
     def _media_link_fallback_body(body: str, media_items: list) -> str:

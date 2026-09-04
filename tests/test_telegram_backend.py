@@ -53,6 +53,7 @@ class FakeClient:
         self.users = users
         self.sent_messages = []
         self.sent_files = []
+        self.sent_file_kwargs = []
         self.forwarded_messages = []
         self.profile_photo_downloads = []
         self.fail_profile_photo_download = False
@@ -71,6 +72,7 @@ class FakeClient:
 
     async def send_file(self, entity, file, caption=None, reply_to=None, **kwargs):
         self.sent_files.append((entity, file, caption, reply_to))
+        self.sent_file_kwargs.append(kwargs)
         if self.fail_url_send_file and isinstance(file, str) and file.startswith(("http://", "https://")):
             raise WebpageMediaEmptyError(request=None)
         return type("FakeSentFileMessage", (), {"id": 778})()
@@ -211,6 +213,10 @@ def test_send_direct_message_uploads_downloaded_media_when_telegram_rejects_url(
     asyncio.run(_test_send_direct_message_uploads_downloaded_media_when_telegram_rejects_url())
 
 
+def test_send_direct_message_uploads_xabber_voice_as_telegram_voice_note():
+    asyncio.run(_test_send_direct_message_uploads_xabber_voice_as_telegram_voice_note())
+
+
 def test_send_direct_message_sends_link_when_media_download_fails():
     asyncio.run(_test_send_direct_message_sends_link_when_media_download_fails())
 
@@ -278,6 +284,47 @@ async def _test_send_direct_message_uploads_downloaded_media_when_telegram_rejec
         (bot_entity, "https://xabber.example/gallery/photo.jpg", "caption", None),
         (bot_entity, "/tmp/photo.jpg", "caption", None),
     ]
+    assert client.sent_messages == []
+
+
+async def _test_send_direct_message_uploads_xabber_voice_as_telegram_voice_note():
+    backend = TelegramBackend(_settings())
+    bot_entity = FakeEntity(user_id=200, username="test_bot", bot=True)
+    client = FakeClient([FakeDialog(200, "Bot", bot_entity)])
+
+    async def download_media(media_items):
+        assert [item.url for item in media_items] == ["https://xabber.example/gallery/voice.webm"]
+        assert media_items[0].voice
+        return [
+            {
+                "path": "/tmp/voice.ogg",
+                "mime_type": "audio/ogg",
+                "file_size": 2345,
+            }
+        ]
+
+    backend._download_outgoing_media_files = download_media
+
+    message_id = await backend.send_direct_message(
+        client,
+        200,
+        "",
+        media=(
+            XmppOutgoingMedia(
+                url="https://xabber.example/gallery/voice.webm",
+                name="voice.webm",
+                mime_type="audio/webm;codecs=opus",
+                duration=3,
+                voice=True,
+            ),
+        ),
+    )
+
+    assert message_id == "778"
+    assert client.sent_files == [(bot_entity, "/tmp/voice.ogg", None, None)]
+    assert client.sent_file_kwargs[0]["mime_type"] == "audio/ogg"
+    assert client.sent_file_kwargs[0]["file_size"] == 2345
+    assert client.sent_file_kwargs[0]["voice_note"] is True
     assert client.sent_messages == []
 
 
