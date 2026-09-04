@@ -11,6 +11,7 @@ from xmpp_transport_telegram.xmpp.namespaces import (
     PUBSUB_AVATAR_METADATA_THUMBNAIL_NS,
     SID_NS,
     TRANSPORT_FAKE_OUTGOING_TAG,
+    VOICE_MESSAGE_NS,
     XABBER_REFERENCES_NS,
 )
 from xmpp_transport_telegram.xmpp.models import XmppForwardReference, XmppOutgoingMedia, XmppReplyReference
@@ -46,7 +47,10 @@ class XmppMessageXml:
                 "end": str(end),
             },
         )
-        file_sharing = ET.SubElement(reference, "{%s}file-sharing" % FILES_NS)
+        parent = reference
+        if bool(getattr(media, "voice", False)):
+            parent = ET.SubElement(reference, "{%s}voice-message" % VOICE_MESSAGE_NS)
+        file_sharing = ET.SubElement(parent, "{%s}file-sharing" % FILES_NS)
         file_el = ET.SubElement(file_sharing, "file")
         cls.append_media_field(file_el, "media-type", getattr(media, "mime_type", None))
         thumbnail_url = getattr(media, "thumbnail_url", None)
@@ -60,6 +64,7 @@ class XmppMessageXml:
         cls.append_media_field(file_el, "size", getattr(media, "size", None))
         cls.append_media_field(file_el, "height", getattr(media, "height", None))
         cls.append_media_field(file_el, "width", getattr(media, "width", None))
+        cls.append_media_field(file_el, "duration", getattr(media, "duration", None))
         sources = ET.SubElement(file_sharing, "sources")
         uri = ET.SubElement(sources, "uri")
         uri.text = str(getattr(media, "url", ""))
@@ -301,12 +306,26 @@ class XmppMessageXml:
         for reference in xml:
             if reference.tag != "{%s}reference" % XABBER_REFERENCES_NS:
                 continue
-            file_sharing = cls.child_by_local_name(reference, "file-sharing", namespace=FILES_NS)
+            voice_message = cls.child_by_local_name(reference, "voice-message", namespace=VOICE_MESSAGE_NS)
+            file_sharing_parent = voice_message if voice_message is not None else reference
+            file_sharing = cls.child_by_local_name(file_sharing_parent, "file-sharing", namespace=FILES_NS)
             if file_sharing is None:
                 continue
             item = cls.media_from_file_sharing(file_sharing)
             if item is None or item.url in seen_urls:
                 continue
+            if voice_message is not None:
+                item = XmppOutgoingMedia(
+                    url=item.url,
+                    name=item.name,
+                    mime_type=item.mime_type,
+                    size=item.size,
+                    thumbnail_url=item.thumbnail_url,
+                    width=item.width,
+                    height=item.height,
+                    duration=item.duration,
+                    voice=True,
+                )
             seen_urls.add(item.url)
             media.append(item)
         return tuple(media)

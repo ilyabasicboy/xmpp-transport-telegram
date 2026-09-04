@@ -2,6 +2,7 @@ import asyncio
 import logging
 import posixpath
 import secrets
+import shutil
 from datetime import datetime, timezone
 from typing import Dict, Optional
 from urllib.parse import quote
@@ -27,6 +28,11 @@ log = logging.getLogger(__name__)
 MEDIA_PROXY_CONNECT_TIMEOUT_SECONDS = 15
 MEDIA_PROXY_LOOKUP_TIMEOUT_SECONDS = 15
 GROUP_MEMBER_SYNC_TIMEOUT_SECONDS = 2
+XABBER_VOICE_MIME_TYPE = "audio/webm;codecs=opus"
+MEDIA_CORS_HEADERS = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Expose-Headers": "Content-Length, Content-Type, Content-Disposition",
+}
 
 
 class TelegramTransport:
@@ -96,17 +102,21 @@ class TelegramTransport:
                 "Content-Disposition": 'inline; filename="%s"' % self._http_header_filename(row["file_name"]),
                 "Cache-Control": "private, max-age=300",
             }
-            if row["bytes_count"] is not None:
+            headers.update(MEDIA_CORS_HEADERS)
+            if row["bytes_count"] is not None and not self._is_xabber_voice_mime_type(row["mime_type"]):
                 headers["Content-Length"] = str(row["bytes_count"])
             response = web.StreamResponse(status=200, headers=headers)
             await response.prepare(request)
-            async for chunk in self.telegram.iter_media_download(
-                client,
-                media,
-                request_size=self.settings.media_stream_request_size,
-                file_size=row["bytes_count"],
-            ):
-                await response.write(bytes(chunk))
+            if self._is_xabber_voice_mime_type(row["mime_type"]):
+                await self._stream_converted_voice_media(response, client, media, row["bytes_count"])
+            else:
+                async for chunk in self.telegram.iter_media_download(
+                    client,
+                    media,
+                    request_size=self.settings.media_stream_request_size,
+                    file_size=row["bytes_count"],
+                ):
+                    await response.write(bytes(chunk))
             await response.write_eof()
             log.debug(
                 "Finished Telegram media proxy owner=%s peer_id=%s message_id=%s",
@@ -130,6 +140,64 @@ class TelegramTransport:
                 await client.disconnect()
             finally:
                 semaphore.release()
+
+    async def _stream_converted_voice_media(self, response: web.StreamResponse, client, media, bytes_count) -> None:
+        if shutil.which("ffmpeg") is None:
+            raise web.HTTPInternalServerError(reason="ffmpeg is required to convert Telegram voice messages")
+        process = await asyncio.create_subprocess_exec(
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            "pipe:0",
+            "-c:a",
+            "copy",
+            "-f",
+            "webm",
+            "pipe:1",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        writer = asyncio.create_task(self._write_media_to_ffmpeg(process, client, media, bytes_count))
+        stderr = b""
+        try:
+            while True:
+                chunk = await process.stdout.read(65536)
+                if not chunk:
+                    break
+                await response.write(chunk)
+            await writer
+            stderr = await process.stderr.read()
+            returncode = await process.wait()
+            if returncode != 0:
+                log.warning("Telegram voice conversion failed with ffmpeg status=%s stderr=%s", returncode, stderr[:500])
+                raise web.HTTPBadGateway(reason="Telegram voice conversion failed")
+        finally:
+            if not writer.done():
+                writer.cancel()
+                try:
+                    await writer
+                except asyncio.CancelledError:
+                    pass
+            if process.returncode is None:
+                process.kill()
+                await process.wait()
+
+    async def _write_media_to_ffmpeg(self, process, client, media, bytes_count) -> None:
+        try:
+            async for chunk in self.telegram.iter_media_download(
+                client,
+                media,
+                request_size=self.settings.media_stream_request_size,
+                file_size=bytes_count,
+            ):
+                process.stdin.write(bytes(chunk))
+                await process.stdin.drain()
+        finally:
+            process.stdin.close()
+            await process.stdin.wait_closed()
 
     def _media_stream_semaphore(self, owner_jid: str) -> asyncio.Semaphore:
         semaphore = self._media_stream_semaphores.get(owner_jid)
@@ -933,15 +1001,19 @@ class TelegramTransport:
             return None
         message_id = self._incoming_telegram_message_id(event)
         file_info = getattr(message, "file", None)
-        mime_type = getattr(file_info, "mime_type", None) or self._telegram_media_mime_type(message)
+        voice = self._is_telegram_voice_message(message)
+        mime_type = XABBER_VOICE_MIME_TYPE if voice else (
+            getattr(file_info, "mime_type", None) or self._telegram_media_mime_type(message)
+        )
         file_name = self._safe_media_filename(
             getattr(file_info, "name", None),
             mime_type,
             message_id,
         )
-        bytes_count = getattr(file_info, "size", None)
+        bytes_count = None if voice else getattr(file_info, "size", None)
         width = getattr(file_info, "width", None)
         height = getattr(file_info, "height", None)
+        duration = self._telegram_media_duration(message, file_info)
         token = secrets.token_urlsafe(24)
         url = "%s/media/%s/%s" % (
             self.settings.media_base_url,
@@ -966,19 +1038,57 @@ class TelegramTransport:
             size=bytes_count,
             width=width,
             height=height,
+            duration=duration,
+            voice=voice,
         )
 
     @staticmethod
     def _telegram_media_mime_type(message) -> str:
         if getattr(message, "photo", None) is not None:
             return "image/jpeg"
+        if TelegramTransport._is_telegram_voice_message(message):
+            return XABBER_VOICE_MIME_TYPE
         return "application/octet-stream"
+
+    @staticmethod
+    def _is_xabber_voice_mime_type(mime_type: str) -> bool:
+        return str(mime_type or "").replace(" ", "").lower() == XABBER_VOICE_MIME_TYPE
+
+    @staticmethod
+    def _is_telegram_voice_message(message) -> bool:
+        if getattr(message, "voice", None) is not None:
+            return True
+        document = getattr(message, "document", None)
+        for attr in getattr(document, "attributes", ()) or ():
+            if isinstance(attr, types.DocumentAttributeAudio) and bool(getattr(attr, "voice", False)):
+                return True
+        return False
+
+    @staticmethod
+    def _telegram_media_duration(message, file_info) -> Optional[int]:
+        duration = getattr(file_info, "duration", None)
+        if duration is None:
+            document = getattr(message, "document", None)
+            for attr in getattr(document, "attributes", ()) or ():
+                if isinstance(attr, types.DocumentAttributeAudio):
+                    duration = getattr(attr, "duration", None)
+                    break
+        try:
+            duration_int = int(round(float(duration)))
+        except (TypeError, ValueError):
+            return None
+        return duration_int if duration_int > 0 else None
 
     @staticmethod
     def _safe_media_filename(name, mime_type: str, message_id: str) -> str:
         value = posixpath.basename(str(name or "").strip())
         if value in ("", ".", ".."):
-            extension = ".jpg" if mime_type == "image/jpeg" else ".bin"
+            if mime_type == "image/jpeg":
+                extension = ".jpg"
+            elif TelegramTransport._is_xabber_voice_mime_type(mime_type):
+                extension = ".webm"
+            else:
+                extension = ".bin"
             value = "telegram-%s%s" % (message_id, extension)
         return "".join(char if char.isalnum() or char in "._- " else "_" for char in value)
 

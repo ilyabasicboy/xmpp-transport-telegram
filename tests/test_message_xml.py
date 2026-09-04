@@ -2,8 +2,8 @@ from xml.etree import ElementTree as ET
 
 from xmpp_transport_telegram.core.qr_store import StoredQrImage
 from xmpp_transport_telegram.xmpp.message_xml import XmppMessageXml
-from xmpp_transport_telegram.xmpp.models import XmppForwardReference
-from xmpp_transport_telegram.xmpp.namespaces import FILES_NS, FORWARDED_NS, XABBER_REFERENCES_NS
+from xmpp_transport_telegram.xmpp.models import XmppForwardReference, XmppOutgoingMedia
+from xmpp_transport_telegram.xmpp.namespaces import FILES_NS, FORWARDED_NS, VOICE_MESSAGE_NS, XABBER_REFERENCES_NS
 
 
 class FakeJid:
@@ -62,6 +62,49 @@ def test_extract_media_references_reads_xabber_file_sharing():
     assert media[0].name == "photo.jpg"
     assert media[0].mime_type == "image/jpeg"
     assert media[0].size == 1234
+
+
+def test_body_with_media_references_wraps_voice_message():
+    voice = XmppOutgoingMedia(
+        url="https://transport.example/media/token/telegram-901.webm",
+        name="telegram-901.webm",
+        mime_type="audio/webm;codecs=opus",
+        duration=3,
+        voice=True,
+    )
+
+    body, references = XmppMessageXml.body_with_media_references("", (voice,))
+
+    assert body == voice.url
+    assert len(references) == 1
+    voice_message = references[0].find("{%s}voice-message" % VOICE_MESSAGE_NS)
+    assert voice_message is not None
+    assert voice_message.find("{%s}file-sharing" % FILES_NS) is not None
+    assert references[0].find("{%s}file-sharing" % FILES_NS) is None
+    assert references[0].find(".//media-type").text == "audio/webm;codecs=opus"
+    assert references[0].find(".//duration").text == "3"
+
+
+def test_extract_media_references_reads_xabber_voice_message():
+    xml = ET.Element("message")
+    reference = ET.SubElement(xml, "{%s}reference" % XABBER_REFERENCES_NS)
+    voice_message = ET.SubElement(reference, "{%s}voice-message" % VOICE_MESSAGE_NS)
+    file_sharing = ET.SubElement(voice_message, "{%s}file-sharing" % FILES_NS)
+    file_el = ET.SubElement(file_sharing, "file")
+    ET.SubElement(file_el, "media-type").text = "audio/ogg"
+    ET.SubElement(file_el, "name").text = "voice.ogg"
+    ET.SubElement(file_el, "duration").text = "4"
+    sources = ET.SubElement(file_sharing, "sources")
+    ET.SubElement(sources, "uri").text = "https://xabber.example/gallery/voice.ogg"
+    msg = FakeMessage("", "chat-100@telegram.example.com", xml)
+
+    media = XmppMessageXml.extract_media_references(msg)
+
+    assert len(media) == 1
+    assert media[0].url == "https://xabber.example/gallery/voice.ogg"
+    assert media[0].mime_type == "audio/ogg"
+    assert media[0].duration == 4
+    assert media[0].voice
 
 
 def test_extract_body_media_urls_reads_gallery_fallback_and_strips_body():

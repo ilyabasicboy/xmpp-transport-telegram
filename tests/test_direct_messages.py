@@ -327,6 +327,7 @@ class FakeEvent:
         media=None,
         file_info=None,
         photo=None,
+        voice=None,
         date=None,
         chat_photo=None,
         action=None,
@@ -356,6 +357,7 @@ class FakeEvent:
                 "media": media,
                 "file": file_info,
                 "photo": photo,
+                "voice": voice,
                 "date": date,
                 "action": action,
             },
@@ -759,6 +761,91 @@ async def _test_incoming_telegram_direct_media_only_sends_file_reference():
     ]
 
 
+def test_incoming_telegram_direct_voice_sends_xabber_voice_media():
+    asyncio.run(_test_incoming_telegram_direct_voice_sends_xabber_voice_media())
+
+
+async def _test_incoming_telegram_direct_voice_sends_xabber_voice_media():
+    repository = FakeRepository()
+    transport = TelegramTransport(_settings(), repository)
+    transport.xmpp = FakeXmpp()
+    file_info = type(
+        "FakeFileInfo",
+        (),
+        {
+            "name": None,
+            "mime_type": "audio/ogg",
+            "size": 4321,
+            "width": None,
+            "height": None,
+            "duration": 3,
+        },
+    )()
+
+    await transport._handle_incoming_telegram_message(
+        "user@example.com",
+        FakeEvent(chat_id=100, raw_text="", message_id=901, media=object(), file_info=file_info, voice=object()),
+    )
+
+    media = transport.xmpp.client.direct_media[0][0]
+    assert media.name == "telegram-901.webm"
+    assert media.mime_type == "audio/webm;codecs=opus"
+    assert media.size is None
+    assert media.duration == 3
+    assert media.voice
+
+
+def test_stream_voice_media_converts_to_xabber_webm_without_content_length(monkeypatch):
+    asyncio.run(_test_stream_voice_media_converts_to_xabber_webm_without_content_length(monkeypatch))
+
+
+async def _test_stream_voice_media_converts_to_xabber_webm_without_content_length(monkeypatch):
+    settings = _settings()
+    cipher = SessionCipher(settings.session_encryption_key)
+    repository = FakeRepository()
+    repository.session = {
+        "telegram_user_id": 42,
+        "phone": None,
+        "encrypted_session": cipher.encrypt("stored-session"),
+        "connected": True,
+    }
+    repository.media_refs["token"] = {
+        "owner_jid": "user@example.com",
+        "peer_id": 100,
+        "message_id": "901",
+        "file_name": "telegram-901.webm",
+        "mime_type": "audio/webm;codecs=opus",
+        "bytes_count": 4321,
+        "width": None,
+        "height": None,
+    }
+    transport = TelegramTransport(settings, repository)
+    telegram = FakeTelegramBackend()
+    telegram.media = SimpleNamespace(chunks=(b"ogg"))
+    transport.telegram = telegram
+
+    async def stream_converted_voice(response, client, media, bytes_count):
+        assert client is telegram.media_clients[0]
+        assert media is telegram.media
+        assert bytes_count == 4321
+        await response.write(b"webm")
+
+    transport._stream_converted_voice_media = stream_converted_voice
+    FakeStreamResponse.instances = []
+    monkeypatch.setattr(transport_module.web, "StreamResponse", FakeStreamResponse)
+    request = SimpleNamespace(match_info={"token": "token"})
+
+    response = await transport.stream_media(request)
+
+    assert response.headers["Content-Type"] == "audio/webm;codecs=opus"
+    assert response.headers["Access-Control-Allow-Origin"] == "*"
+    assert "Content-Type" in response.headers["Access-Control-Expose-Headers"]
+    assert "Content-Length" not in response.headers
+    assert response.chunks == [b"webm"]
+    assert response.eof
+    assert telegram.media_clients[0].disconnected
+
+
 def test_stream_media_proxies_telegram_chunks(monkeypatch):
     asyncio.run(_test_stream_media_proxies_telegram_chunks(monkeypatch))
 
@@ -798,6 +885,8 @@ async def _test_stream_media_proxies_telegram_chunks(monkeypatch):
     assert response.chunks == [b"abc", b"defg"]
     assert response.headers["Content-Type"] == "image/jpeg"
     assert response.headers["Content-Length"] == "7"
+    assert response.headers["Access-Control-Allow-Origin"] == "*"
+    assert "Content-Disposition" in response.headers["Access-Control-Expose-Headers"]
     assert telegram.media_clients[0].disconnected
     assert telegram.clients == []
 

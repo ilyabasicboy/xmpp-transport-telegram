@@ -49,3 +49,5 @@ class TelegramMedia:
     width: Optional[int] = None
     height: Optional[int] = None
     thumbnail_url: Optional[str] = None
+    duration: Optional[int] = None
+    voice: bool = False
