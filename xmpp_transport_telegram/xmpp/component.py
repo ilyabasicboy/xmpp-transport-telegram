@@ -85,7 +85,21 @@ class TelegramCommandComponent(ComponentXMPP):
             and group_sender_jid is None
             and self._is_transport_group_jid(from_jid)
         ):
-            log.debug("Ignoring Xabber group service message from %s", from_jid)
+            fallback_group_sender_jid = self._fallback_group_sender_jid(from_jid, body)
+            if fallback_group_sender_jid is None:
+                log.debug(
+                    "Ignoring Xabber group service message from %s body_length=%s",
+                    from_jid,
+                    len(body),
+                )
+                return
+            log.debug(
+                "Routing Xabber group message without sender marker from=%s owner=%s body_length=%s",
+                from_jid,
+                fallback_group_sender_jid,
+                len(body),
+            )
+            await self._handle_direct_message(message, from_jid, to_jid, body, fallback_group_sender_jid)
             return
         if to_jid.bare == self.bot_jid and group_sender_jid is not None:
             await self._handle_direct_message(message, from_jid, to_jid, body, group_sender_jid)
@@ -282,6 +296,36 @@ class TelegramCommandComponent(ComponentXMPP):
             return False
         localpart = jid[: -len(suffix)]
         return localpart.startswith("telegramg-")
+
+    def _fallback_group_sender_jid(self, group_jid: str, body: str) -> Optional[str]:
+        if not body or self._looks_like_xabber_group_service_message(body):
+            return None
+        suffix = "@%s" % self.transport_server_domain
+        if not group_jid.endswith(suffix):
+            return None
+        localpart = group_jid[: -len(suffix)]
+        if not localpart.startswith("telegramg-"):
+            return None
+        payload = localpart.removeprefix("telegramg-")
+        if "-" not in payload:
+            return None
+        owner_hex, _chat_id = payload.split("-", 1)
+        try:
+            owner_jid = bytes.fromhex(owner_hex).decode("utf-8")
+        except ValueError:
+            return None
+        return owner_jid if owner_jid else None
+
+    @staticmethod
+    def _looks_like_xabber_group_service_message(body: str) -> bool:
+        normalized = " ".join(body.lower().split())
+        service_fragments = (
+            " joined the group",
+            " left the group",
+            " was invited to the group",
+            " was removed from the group",
+        )
+        return any(fragment in normalized for fragment in service_fragments)
 
     async def send_transport_operation(
         self,

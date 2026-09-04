@@ -164,6 +164,7 @@ class FakeTelegramClient:
 class FakeTelegramBackend:
     def __init__(self):
         self.clients = []
+        self.media_clients = []
         self.sent = []
         self.group_sent = []
         self.groups = []
@@ -172,6 +173,11 @@ class FakeTelegramBackend:
     def client_for_session(self, session_data=None):
         client = FakeTelegramClient()
         self.clients.append(client)
+        return client
+
+    def media_client_for_session(self, session_data=None):
+        client = FakeTelegramClient()
+        self.media_clients.append(client)
         return client
 
     async def send_direct_message(
@@ -783,7 +789,8 @@ async def _test_stream_media_proxies_telegram_chunks(monkeypatch):
     assert response.chunks == [b"abc", b"defg"]
     assert response.headers["Content-Type"] == "image/jpeg"
     assert response.headers["Content-Length"] == "7"
-    assert telegram.clients[0].disconnected
+    assert telegram.media_clients[0].disconnected
+    assert telegram.clients == []
 
 
 def test_incoming_telegram_direct_reply_sends_xabber_reply_reference():
@@ -956,6 +963,7 @@ async def _test_incoming_telegram_group_message_sends_to_xabber_group():
         "member_jid": "user@example.com",
         "send": False,
         "reason": "Telegram group member",
+        "timeout": 2,
     }
     assert transport.xmpp.client.invites[1] == {
         "owner_jid": "user@example.com",
@@ -964,6 +972,7 @@ async def _test_incoming_telegram_group_message_sends_to_xabber_group():
         "member_jid": "chat-200@telegram.example.com",
         "send": False,
         "reason": "Telegram group member",
+        "timeout": 2,
     }
     assert transport.xmpp.client.direct_invites[0] == {
         "from_jid": "bot@telegram.example.com",
@@ -1136,6 +1145,7 @@ async def _test_incoming_telegram_group_message_does_not_create_existing_xabber_
             "member_jid": "user@example.com",
             "send": False,
             "reason": "Telegram group member",
+            "timeout": 2,
         },
         {
             "owner_jid": "user@example.com",
@@ -1144,6 +1154,7 @@ async def _test_incoming_telegram_group_message_does_not_create_existing_xabber_
             "member_jid": "chat-200@telegram.example.com",
             "send": False,
             "reason": "Telegram group member",
+            "timeout": 2,
         }
     ]
     assert transport.xmpp.client.direct_invites[0]["to_jid"] == "user@example.com"

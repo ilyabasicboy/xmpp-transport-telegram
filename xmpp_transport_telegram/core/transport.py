@@ -24,6 +24,10 @@ from xmpp_transport_telegram.xmpp.models import XmppForwardReference, XmppIncomi
 
 log = logging.getLogger(__name__)
 
+MEDIA_PROXY_CONNECT_TIMEOUT_SECONDS = 15
+MEDIA_PROXY_LOOKUP_TIMEOUT_SECONDS = 15
+GROUP_MEMBER_SYNC_TIMEOUT_SECONDS = 2
+
 
 class TelegramTransport:
     TELEGRAM_CONTACTS_CIRCLE = "Telegram"
@@ -55,6 +59,7 @@ class TelegramTransport:
         self._group_reply_aliases: Dict[tuple, str] = {}
         self._group_ensure_signatures: Dict[tuple, str] = {}
         self._group_protocol_members: set = set()
+        self._media_stream_semaphores: Dict[str, asyncio.Semaphore] = {}
         self._avatar_cleanup_task: Optional[asyncio.Task] = None
         self._stopped = asyncio.Event()
 
@@ -64,15 +69,27 @@ class TelegramTransport:
         if row is None:
             raise web.HTTPNotFound()
         session_data = await self._load_connected_session_data(row["owner_jid"])
-        client = self.telegram.client_for_session(session_data)
-        await client.connect()
+        semaphore = self._media_stream_semaphore(row["owner_jid"])
+        await semaphore.acquire()
+        client = self.telegram.media_client_for_session(session_data)
+        log.debug(
+            "Starting Telegram media proxy owner=%s peer_id=%s message_id=%s bytes=%s",
+            row["owner_jid"],
+            row["peer_id"],
+            row["message_id"],
+            row["bytes_count"],
+        )
+        await asyncio.wait_for(client.connect(), timeout=MEDIA_PROXY_CONNECT_TIMEOUT_SECONDS)
         try:
             if not await client.is_user_authorized():
                 raise web.HTTPNotFound()
-            media = await self.telegram.get_message_media(
-                client,
-                int(row["peer_id"]),
-                str(row["message_id"]),
+            media = await asyncio.wait_for(
+                self.telegram.get_message_media(
+                    client,
+                    int(row["peer_id"]),
+                    str(row["message_id"]),
+                ),
+                timeout=MEDIA_PROXY_LOOKUP_TIMEOUT_SECONDS,
             )
             headers = {
                 "Content-Type": row["mime_type"],
@@ -91,11 +108,35 @@ class TelegramTransport:
             ):
                 await response.write(bytes(chunk))
             await response.write_eof()
+            log.debug(
+                "Finished Telegram media proxy owner=%s peer_id=%s message_id=%s",
+                row["owner_jid"],
+                row["peer_id"],
+                row["message_id"],
+            )
             return response
         except FileNotFoundError:
             raise web.HTTPNotFound()
+        except asyncio.TimeoutError:
+            log.warning(
+                "Telegram media proxy timed out owner=%s peer_id=%s message_id=%s",
+                row["owner_jid"],
+                row["peer_id"],
+                row["message_id"],
+            )
+            raise web.HTTPGatewayTimeout()
         finally:
-            await client.disconnect()
+            try:
+                await client.disconnect()
+            finally:
+                semaphore.release()
+
+    def _media_stream_semaphore(self, owner_jid: str) -> asyncio.Semaphore:
+        semaphore = self._media_stream_semaphores.get(owner_jid)
+        if semaphore is None:
+            semaphore = asyncio.Semaphore(1)
+            self._media_stream_semaphores[owner_jid] = semaphore
+        return semaphore
 
     async def run_forever(self) -> None:
         await self.xmpp.start()
@@ -368,6 +409,7 @@ class TelegramTransport:
                 member_jid=member_jid,
                 send=False,
                 reason="Telegram group member",
+                timeout=GROUP_MEMBER_SYNC_TIMEOUT_SECONDS,
             )
         except Exception as exc:
             if self._is_group_member_already_invited_error(exc):

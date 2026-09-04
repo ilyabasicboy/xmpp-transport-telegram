@@ -9,6 +9,15 @@ from xmpp_transport_telegram.telegram.models import TelegramForwardReference
 from xmpp_transport_telegram.xmpp.models import XmppOutgoingMedia
 
 
+def test_media_client_does_not_receive_updates_and_uses_short_retries():
+    client = TelegramBackend(_settings()).media_client_for_session()
+
+    assert client._no_updates is True
+    assert client._connection_retries == 1
+    assert client._request_retries == 1
+    assert client._timeout == 10
+
+
 class FakeEntity:
     def __init__(
         self,

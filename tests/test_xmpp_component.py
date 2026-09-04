@@ -125,6 +125,38 @@ def test_xabber_group_service_message_to_bot_does_not_run_command_handler():
     asyncio.run(run_test())
 
 
+def test_xabber_group_user_message_without_sender_marker_uses_group_owner():
+    async def run_test():
+        direct_calls = []
+
+        async def command_handler(_from_jid, _body, _notify):
+            raise AssertionError("command handler should not be called")
+
+        async def direct_message_handler(message):
+            direct_calls.append(message)
+
+        client = TelegramCommandComponent(
+            make_settings(),
+            command_handler,
+            direct_message_handler,
+        )
+        await client._handle_message_async(
+            FakeMessage(
+                from_jid="telegramg-7465737431406578616d706c652e636f6d--5386493808@example.com/Group",
+                to_jid="bot@telegram.example.com",
+                body="test",
+            )
+        )
+
+        assert len(direct_calls) == 1
+        assert direct_calls[0].sender == "telegramg-7465737431406578616d706c652e636f6d--5386493808@example.com"
+        assert direct_calls[0].recipient == "bot@telegram.example.com"
+        assert direct_calls[0].body == "test"
+        assert direct_calls[0].group_sender_jid == "test1@example.com"
+
+    asyncio.run(run_test())
+
+
 def test_xabber_group_user_message_to_bot_runs_direct_handler():
     async def run_test():
         direct_calls = []

@@ -37,6 +37,18 @@ class TelegramBackend:
             catch_up=False,
         )
 
+    def media_client_for_session(self, session_data: Optional[str] = None) -> TelegramClient:
+        return TelegramClient(
+            StringSession(session_data or ""),
+            self.settings.telegram_api_id,
+            self.settings.telegram_api_hash,
+            catch_up=False,
+            receive_updates=False,
+            request_retries=1,
+            connection_retries=1,
+            timeout=10,
+        )
+
     async def list_dialogs(self, client: TelegramClient, limit: int = 100) -> List[TelegramDialog]:
         dialogs = []
         async for dialog in client.iter_dialogs(limit=limit):
