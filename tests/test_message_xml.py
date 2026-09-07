@@ -144,6 +144,42 @@ def test_body_with_forward_references_adds_xabber_forward_payload():
     assert message.findtext("{jabber:client}body") == "Forwarded text"
 
 
+def test_forward_fallback_and_media_ranges_use_body_offsets():
+    forward = XmppForwardReference(
+        message_id="777",
+        body="⚡️Forwarded > text\nsecond line",
+        sender="chat-200@telegram.example.com",
+        recipient="user@example.com",
+    )
+    image = XmppOutgoingMedia(
+        url="https://transport.example/media/token/photo.jpg",
+        name="photo.jpg",
+        mime_type="image/jpeg",
+    )
+
+    body, forward_references = XmppMessageXml.body_with_forward_references("", (forward,))
+    body, media_references = XmppMessageXml.body_with_media_references(body, (image,))
+
+    assert body.endswith(image.url)
+    assert forward_references[0].attrib["begin"] == "0"
+    assert forward_references[0].attrib["end"] == str(XmppMessageXml.body_range_len("> ⚡️Forwarded > text\n> second line\n"))
+    assert media_references[0].attrib["begin"] == str(XmppMessageXml.body_range_len(body[: body.index(image.url)]))
+    assert media_references[0].attrib["end"] == str(XmppMessageXml.body_range_len(body))
+    assert XmppMessageXml.strip_escaped_ranges(
+        body,
+        [
+            (
+                int(forward_references[0].attrib["begin"]),
+                int(forward_references[0].attrib["end"]),
+            ),
+            (
+                int(media_references[0].attrib["begin"]),
+                int(media_references[0].attrib["end"]),
+            ),
+        ],
+    ) == ""
+
+
 def test_extract_forwarded_body_and_references_removes_forward_fallback():
     body, references = XmppMessageXml.body_with_forward_references(
         "comment",

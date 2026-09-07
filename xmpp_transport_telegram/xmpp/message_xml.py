@@ -29,9 +29,9 @@ class XmppMessageXml:
         media_items = [item for item in media if str(getattr(item, "url", "") or "").strip()]
         for index, item in enumerate(media_items):
             url = str(getattr(item, "url", "") or "").strip()
-            begin = cls.escaped_text_len(result)
+            begin = cls.body_range_len(result)
             result += url
-            end = cls.escaped_text_len(result)
+            end = cls.body_range_len(result)
             references.append(cls.media_reference_element(item, begin, end))
             if index != len(media_items) - 1:
                 result += "\n"
@@ -80,16 +80,12 @@ class XmppMessageXml:
         child.text = str(value)
 
     @staticmethod
-    def xml_escaped_text(value: str) -> str:
-        return value.replace("&", "&amp;").replace(">", "&gt;").replace("<", "&lt;")
-
-    @staticmethod
     def utf16_len(value: str) -> int:
         return len(value.encode("utf-16-le")) // 2
 
     @classmethod
-    def escaped_text_len(cls, value: str) -> int:
-        return cls.utf16_len(cls.xml_escaped_text(value))
+    def body_range_len(cls, value: str) -> int:
+        return cls.utf16_len(value)
 
     @classmethod
     def extract_reply_to_message_ids(cls, msg) -> tuple:
@@ -242,8 +238,7 @@ class XmppMessageXml:
         range_index = 0
         sorted_ranges = sorted(ranges)
         for character in body:
-            escaped_character = cls.xml_escaped_text(character)
-            next_offset = escaped_offset + cls.utf16_len(escaped_character)
+            next_offset = escaped_offset + cls.utf16_len(character)
             while range_index < len(sorted_ranges) and escaped_offset >= sorted_ranges[range_index][1]:
                 range_index += 1
             in_range = (
@@ -464,7 +459,7 @@ class XmppMessageXml:
             {
                 "type": "mutable",
                 "begin": "0",
-                "end": str(cls.escaped_text_len(fallback_prefix)),
+                "end": str(cls.body_range_len(fallback_prefix)),
             },
         )
         forwarded = ET.SubElement(reference, "{%s}forwarded" % FORWARDED_NS)
@@ -494,9 +489,9 @@ class XmppMessageXml:
         result = ""
         for forward_reference in forward_references:
             fallback = cls.forward_fallback_text(forward_reference)
-            begin = cls.escaped_text_len(result)
+            begin = cls.body_range_len(result)
             result += fallback
-            end = cls.escaped_text_len(result)
+            end = cls.body_range_len(result)
             references.append(cls.forward_reference_element(forward_reference, begin=begin, end=end))
         if body:
             result += body

@@ -706,6 +706,7 @@ class TelegramTransport:
             await self._stop_telegram_listener(xmpp_jid)
 
     async def _handle_incoming_telegram_message(self, xmpp_jid: str, event) -> None:
+        raw_text = str(getattr(event, "raw_text", "") or "")
         log.debug(
             "Received Telegram NewMessage event xmpp_jid=%s out=%s is_private=%s chat_id=%s sender_id=%s raw_text_length=%s",
             xmpp_jid,
@@ -713,7 +714,7 @@ class TelegramTransport:
             getattr(event, "is_private", None),
             getattr(event, "chat_id", None),
             getattr(event, "sender_id", None),
-            len(str(getattr(event, "raw_text", "") or "")),
+            len(raw_text),
         )
         is_outgoing = getattr(event, "out", False)
         is_group_chat = self._is_telegram_group_chat_event(event)
@@ -724,7 +725,7 @@ class TelegramTransport:
                 return
             await self._handle_telegram_group_avatar_update(xmpp_jid, event, int(peer_id))
             return
-        body = str(getattr(event, "raw_text", "") or "").strip()
+        body = raw_text.strip()
         media = await self._media_reference_from_event(xmpp_jid, event)
         if not body and media is None:
             log.debug("Ignoring Telegram event without text body or media for %s", xmpp_jid)
