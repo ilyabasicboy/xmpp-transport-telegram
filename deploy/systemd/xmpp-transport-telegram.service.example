@@ -1,19 +1,27 @@
 [Unit]
 Description=XMPP to Telegram transport
+Documentation=file:/path/xmpp-transport-telegram/README.md
 After=network-online.target postgresql.service
 Wants=network-online.target
 
 [Service]
 Type=forking
-User=xmpp-transport-telegram
-Group=xmpp-transport-telegram
-WorkingDirectory=/opt/xmpp-transport-telegram
-ExecStart=/opt/xmpp-transport-telegram/venv/bin/python -m xmpp_transport_telegram --config /etc/xmpp-transport-telegram/config.ini --daemon
-ExecStop=/opt/xmpp-transport-telegram/venv/bin/python -m xmpp_transport_telegram --config /etc/xmpp-transport-telegram/config.ini --stop
-PIDFile=/opt/xmpp-transport-telegram/run/xmpp_transport_telegram.pid
+User=username
+Group=usergroup
+WorkingDirectory=/path/xmpp-transport-telegram
+
+RuntimeDirectory=xmpp-transport-telegram
+RuntimeDirectoryMode=0755
+PIDFile=/run/xmpp-transport-telegram/xmpp_transport_telegram.pid
+
+ExecStart=/usr/bin/python3 -m xmpp_transport_telegram --config /path/config.ini --daemon --pid-file /run/xmpp-transport-telegram/xmpp_transport_telegram.pid
+ExecStop=/usr/bin/python3 -m xmpp_transport_telegram --config /path/config.ini --stop --pid-file /run/xmpp-transport-telegram/xmpp_transport_telegram.pid
+ExecStartPost=/bin/sleep 2
+
 Restart=on-failure
-RestartSec=5
-ReadWritePaths=/opt/xmpp-transport-telegram/logs /opt/xmpp-transport-telegram/run /opt/xmpp-transport-telegram/data
+RestartSec=10
+TimeoutStartSec=30
+TimeoutStopSec=40
 
 [Install]
 WantedBy=multi-user.target

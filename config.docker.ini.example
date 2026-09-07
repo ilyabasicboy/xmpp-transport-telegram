@@ -26,6 +26,8 @@ health_host = 127.0.0.1
 health_port = 8089
 qr_storage_dir = data/login_qr
 qr_base_url = http://127.0.0.1:8089
+qr_max_age_seconds = 3600
+qr_cleanup_interval_seconds = 3600
 
 [logging]
 level = INFO

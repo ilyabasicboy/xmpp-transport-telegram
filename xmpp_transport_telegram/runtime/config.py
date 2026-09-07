@@ -51,6 +51,8 @@ class Settings:
     log_file: str
     log_max_bytes: int
     log_backup_count: int
+    qr_max_age_seconds: int = 3600
+    qr_cleanup_interval_seconds: int = 3600
 
 
 def load_settings(config_path: str = DEFAULT_CONFIG_PATH) -> Settings:
@@ -93,6 +95,8 @@ def load_settings(config_path: str = DEFAULT_CONFIG_PATH) -> Settings:
         health_port=health_port,
         qr_storage_dir=config.get("server", "qr_storage_dir", fallback="data/login_qr"),
         qr_base_url=qr_base_url.rstrip("/"),
+        qr_max_age_seconds=config.getint("server", "qr_max_age_seconds", fallback=3600),
+        qr_cleanup_interval_seconds=config.getint("server", "qr_cleanup_interval_seconds", fallback=3600),
         avatar_storage_dir=config.get("server", "avatar_storage_dir", fallback="data/avatars"),
         avatar_base_url=config.get("server", "avatar_base_url", fallback=qr_base_url).rstrip("/"),
         avatar_max_bytes=config.getint("server", "avatar_max_bytes", fallback=524288),

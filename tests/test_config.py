@@ -28,6 +28,8 @@ api_hash = hash
     assert settings.telegram_api_id == 123
     assert settings.qr_storage_dir == "data/login_qr"
     assert settings.qr_base_url == "http://127.0.0.1:8089"
+    assert settings.qr_max_age_seconds == 3600
+    assert settings.qr_cleanup_interval_seconds == 3600
     assert settings.avatar_storage_dir == "data/avatars"
     assert settings.avatar_base_url == "http://127.0.0.1:8089"
     assert settings.avatar_max_bytes == 524288

@@ -69,6 +69,7 @@ class TelegramTransport:
         self._group_echo_message_ids: Dict[tuple, datetime] = {}
         self._group_echo_bodies: Dict[tuple, datetime] = {}
         self._media_stream_semaphores: Dict[str, asyncio.Semaphore] = {}
+        self._qr_cleanup_task: Optional[asyncio.Task] = None
         self._avatar_cleanup_task: Optional[asyncio.Task] = None
         self._stopped = asyncio.Event()
 
@@ -229,6 +230,7 @@ class TelegramTransport:
 
     async def run_forever(self) -> None:
         await self.xmpp.start()
+        self._qr_cleanup_task = asyncio.create_task(self._qr_cleanup_loop())
         self._avatar_cleanup_task = asyncio.create_task(self._avatar_cleanup_loop())
         await self._sync_connected_contacts_after_restart()
         log.info("Telegram transport backend started")
@@ -236,6 +238,13 @@ class TelegramTransport:
 
     async def stop(self) -> None:
         self._stopped.set()
+        if self._qr_cleanup_task is not None:
+            self._qr_cleanup_task.cancel()
+            try:
+                await self._qr_cleanup_task
+            except asyncio.CancelledError:
+                pass
+            self._qr_cleanup_task = None
         if self._avatar_cleanup_task is not None:
             self._avatar_cleanup_task.cancel()
             try:
@@ -400,6 +409,26 @@ class TelegramTransport:
                 raise
             except Exception:
                 log.exception("Telegram avatar cache cleanup failed")
+            try:
+                await asyncio.wait_for(self._stopped.wait(), timeout=interval)
+            except asyncio.TimeoutError:
+                continue
+
+    async def _qr_cleanup_loop(self) -> None:
+        interval = max(self.settings.qr_cleanup_interval_seconds, 1)
+        max_age_seconds = max(self.settings.qr_max_age_seconds, 0)
+        while not self._stopped.is_set():
+            try:
+                removed = self.qr_store.cleanup(
+                    self.settings.qr_storage_dir,
+                    max_age_seconds=max_age_seconds,
+                )
+                if removed:
+                    log.info("Removed %s expired Telegram login QR file(s)", removed)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("Telegram login QR cleanup failed")
             try:
                 await asyncio.wait_for(self._stopped.wait(), timeout=interval)
             except asyncio.TimeoutError:
