@@ -89,6 +89,7 @@ class TelegramTransport:
             row["bytes_count"],
         )
         await asyncio.wait_for(client.connect(), timeout=MEDIA_PROXY_CONNECT_TIMEOUT_SECONDS)
+        response = None
         try:
             if not await client.is_user_authorized():
                 raise web.HTTPNotFound()
@@ -100,6 +101,15 @@ class TelegramTransport:
                 ),
                 timeout=MEDIA_PROXY_LOOKUP_TIMEOUT_SECONDS,
             )
+            if self._is_non_downloadable_telegram_media(media):
+                log.debug(
+                    "Telegram media proxy found non-downloadable media owner=%s peer_id=%s message_id=%s type=%s",
+                    row["owner_jid"],
+                    row["peer_id"],
+                    row["message_id"],
+                    type(media).__name__,
+                )
+                raise web.HTTPNotFound()
             headers = {
                 "Content-Type": row["mime_type"],
                 "Content-Disposition": 'inline; filename="%s"' % self._http_header_filename(row["file_name"]),
@@ -128,6 +138,14 @@ class TelegramTransport:
                 row["message_id"],
             )
             return response
+        except ConnectionResetError:
+            log.debug(
+                "Telegram media proxy client disconnected owner=%s peer_id=%s message_id=%s",
+                row["owner_jid"],
+                row["peer_id"],
+                row["message_id"],
+            )
+            return response if response is not None else web.Response(status=204)
         except FileNotFoundError:
             raise web.HTTPNotFound()
         except asyncio.TimeoutError:
@@ -281,7 +299,10 @@ class TelegramTransport:
             len(body),
         )
         reply_to_message_id, body = self._resolve_direct_reply_payload(xmpp_jid, str(peer_id), message)
-        forward_reference = None if reply_to_message_id or message.media else self._telegram_forward_reference_from_xmpp(message)
+        forward_reference = None if reply_to_message_id or message.media else self._telegram_forward_reference_from_xmpp(
+            xmpp_jid,
+            message,
+        )
         body = message.body if forward_reference is not None else self._flatten_forward_body(message, body=body)
         sent_message_id = await self.telegram.send_direct_message(
             client,
@@ -714,6 +735,13 @@ class TelegramTransport:
         if is_group_chat:
             await self._handle_incoming_telegram_group_message(xmpp_jid, event, int(peer_id), body)
             return
+        if is_outgoing:
+            log.debug(
+                "Ignoring outgoing Telegram direct message for XMPP xmpp_jid=%s peer_id=%s",
+                xmpp_jid,
+                peer_id,
+            )
+            return
         log.debug(
             "Delivering incoming Telegram message to XMPP xmpp_jid=%s peer_id=%s body_length=%s",
             xmpp_jid,
@@ -907,7 +935,10 @@ class TelegramTransport:
             len(body),
         )
         reply_to_message_id, body = self._resolve_group_reply_payload(xmpp_jid, chat_id, message, body)
-        forward_reference = None if reply_to_message_id or message.media else self._telegram_forward_reference_from_xmpp(message)
+        forward_reference = None if reply_to_message_id or message.media else self._telegram_forward_reference_from_xmpp(
+            xmpp_jid,
+            message,
+        )
         body = "" if forward_reference is not None else self._flatten_forward_body(message, body=body)
         sent_message_id = await self.telegram.send_group_message(
             client,
@@ -1047,6 +1078,12 @@ class TelegramTransport:
         media = getattr(message, "media", None) if message is not None else None
         if media is None:
             return None
+        if not self._is_downloadable_telegram_media(message):
+            log.debug(
+                "Ignoring non-downloadable Telegram media preview type=%s",
+                type(media).__name__,
+            )
+            return None
         peer_id = self._peer_id_from_incoming_event(event)
         if peer_id is None:
             return None
@@ -1092,6 +1129,20 @@ class TelegramTransport:
             duration=duration,
             voice=voice,
         )
+
+    @staticmethod
+    def _is_downloadable_telegram_media(message) -> bool:
+        if getattr(message, "file", None) is not None:
+            return True
+        if getattr(message, "photo", None) is not None:
+            return True
+        if getattr(message, "document", None) is not None:
+            return True
+        return TelegramTransport._is_telegram_voice_message(message)
+
+    @staticmethod
+    def _is_non_downloadable_telegram_media(media) -> bool:
+        return isinstance(media, types.MessageMediaWebPage) or media.__class__.__name__ == "MessageMediaWebPage"
 
     @staticmethod
     def _telegram_media_mime_type(message) -> str:
@@ -1372,20 +1423,44 @@ class TelegramTransport:
 
     def _telegram_forward_reference_from_xmpp(
         self,
+        xmpp_jid: str,
         message: XmppIncomingMessage,
     ) -> Optional[TelegramForwardReference]:
         for reference in message.forward_references:
-            if not reference.message_id or not self._is_telegram_message_id(reference.message_id):
-                continue
             source_peer_id = self._peer_id_from_forward_jid(reference.sender)
             if source_peer_id is None:
                 source_peer_id = self._peer_id_from_forward_jid(reference.recipient)
             if source_peer_id is None:
                 continue
+            message_id = self._telegram_forward_message_id_from_xmpp_reference(
+                xmpp_jid,
+                str(source_peer_id),
+                reference.message_id,
+            )
+            if message_id is None:
+                continue
             return TelegramForwardReference(
                 source_peer_id=source_peer_id,
-                message_id=reference.message_id,
+                message_id=message_id,
             )
+        return None
+
+    def _telegram_forward_message_id_from_xmpp_reference(
+        self,
+        xmpp_jid: str,
+        peer_id: str,
+        message_id: str,
+    ) -> Optional[str]:
+        if not message_id:
+            return None
+        direct_alias = self._direct_reply_aliases.get((xmpp_jid, peer_id, message_id))
+        if direct_alias and self._is_telegram_message_id(direct_alias):
+            return direct_alias
+        group_alias = self._group_reply_aliases.get((xmpp_jid, peer_id, message_id))
+        if group_alias and self._is_telegram_message_id(group_alias):
+            return group_alias
+        if self._is_telegram_message_id(message_id):
+            return message_id
         return None
 
     def _flatten_forward_body(self, message: XmppIncomingMessage, *, body: Optional[str] = None) -> str:

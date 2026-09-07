@@ -134,7 +134,10 @@ class XmppMessageXml:
             )
         if not forward_references:
             return body, ()
-        comment_body = cls.strip_escaped_ranges(body, fallback_ranges).strip()
+        comment_body = cls.strip_forward_fallback_body(
+            cls.strip_escaped_ranges(body, fallback_ranges).strip(),
+            tuple(forward_references),
+        )
         return comment_body, tuple(forward_references)
 
     @classmethod
@@ -176,8 +179,31 @@ class XmppMessageXml:
                 forwarded_media.append(item)
         if not forward_references:
             return body, (), ()
-        comment_body = cls.strip_escaped_ranges(body, fallback_ranges).strip()
+        comment_body = cls.strip_forward_fallback_body(
+            cls.strip_escaped_ranges(body, fallback_ranges).strip(),
+            tuple(forward_references),
+        )
         return comment_body, tuple(forwarded_media), tuple(forward_references)
+
+    @classmethod
+    def strip_forward_fallback_body(cls, body: str, forward_references: tuple) -> str:
+        normalized_body = str(body or "").strip()
+        if not normalized_body or not forward_references:
+            return normalized_body
+        fallback_candidates = []
+        for reference in forward_references:
+            fallback = cls.forward_fallback_body(reference).strip()
+            if not fallback:
+                continue
+            fallback_candidates.append(fallback)
+            sender = str(reference.sender or "").strip()
+            if sender:
+                fallback_candidates.append("%s:\n%s" % (sender, fallback))
+                fallback_candidates.append("%s:\n%s" % (sender.split("/", 1)[0], fallback))
+        for candidate in fallback_candidates:
+            if normalized_body == candidate:
+                return ""
+        return normalized_body
 
     @classmethod
     def is_forward_reference(cls, msg, reference: ET.Element) -> bool:
@@ -187,6 +213,8 @@ class XmppMessageXml:
         outer_to = cls.stanza_bare_jid(msg, "to")
         if not outer_to:
             return False
+        if cls.reference_body_range(reference) is None:
+            return True
         inner_from = str(forwarded_message.attrib.get("from") or "").split("/", 1)[0]
         inner_to = str(forwarded_message.attrib.get("to") or "").split("/", 1)[0]
         return outer_to not in {inner_from, inner_to}
@@ -516,7 +544,7 @@ class XmppMessageXml:
         fallback_body = XmppMessageXml.forward_fallback_body(forward_reference)
         quoted_lines = fallback_body.splitlines() or [fallback_body]
         quoted_text = "\n".join("> %s" % line if line else ">" for line in quoted_lines)
-        return "> %s:\n%s\n" % (forward_reference.sender, quoted_text)
+        return "%s\n" % quoted_text
 
     @staticmethod
     def forward_fallback_body(forward_reference: XmppForwardReference) -> str:
@@ -534,7 +562,7 @@ class XmppMessageXml:
     def reply_fallback_prefix(reply_reference: XmppReplyReference) -> str:
         quoted_lines = reply_reference.body.splitlines() or [reply_reference.body]
         quoted_text = "\n".join("> %s" % line for line in quoted_lines)
-        return "> %s:\n%s\n" % (reply_reference.sender, quoted_text)
+        return "%s\n" % quoted_text
 
     @staticmethod
     def strip_reply_fallback_body(body: str) -> str:

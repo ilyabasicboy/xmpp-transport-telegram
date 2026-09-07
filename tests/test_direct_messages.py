@@ -407,6 +407,12 @@ class FakeStreamResponse:
         self.eof = True
 
 
+class DisconnectingStreamResponse(FakeStreamResponse):
+    async def prepare(self, request):
+        self.prepared = True
+        raise ConnectionResetError("Cannot write to closing transport")
+
+
 class FakeForwardHeader:
     def __init__(
         self,
@@ -644,6 +650,99 @@ async def _test_xmpp_direct_forward_uses_telegram_native_forward():
     assert media == ()
 
 
+def test_xmpp_direct_forward_uses_direct_alias_for_xabber_message_id():
+    asyncio.run(_test_xmpp_direct_forward_uses_direct_alias_for_xabber_message_id())
+
+
+async def _test_xmpp_direct_forward_uses_direct_alias_for_xabber_message_id():
+    settings = _settings()
+    cipher = SessionCipher(settings.session_encryption_key)
+    repository = FakeRepository()
+    repository.session = {
+        "telegram_user_id": 42,
+        "phone": None,
+        "encrypted_session": cipher.encrypt("stored-session"),
+        "connected": True,
+    }
+    transport = TelegramTransport(settings, repository)
+    transport.telegram = FakeTelegramBackend()
+    transport._remember_direct_reply_alias(
+        xmpp_jid="user@example.com",
+        peer_id="100",
+        source_message_id="xabber-direct-1",
+        target_message_id="901",
+    )
+
+    await transport.send_direct_message(
+        XmppIncomingMessage(
+            sender="user@example.com",
+            recipient="chat-200@telegram.example.com",
+            body="",
+            forward_references=(
+                XmppForwardReference(
+                    message_id="xabber-direct-1",
+                    body="?",
+                    sender="user@example.com",
+                    recipient="chat-100@telegram.example.com",
+                ),
+            ),
+        )
+    )
+
+    peer_id, body, reply_to_message_id, forward_reference, media = transport.telegram.sent[0]
+    assert (peer_id, body, reply_to_message_id) == (200, "", None)
+    assert forward_reference.source_peer_id == 100
+    assert forward_reference.message_id == "901"
+    assert media == ()
+
+
+def test_xmpp_direct_forward_uses_group_alias_without_sender_fallback_text():
+    asyncio.run(_test_xmpp_direct_forward_uses_group_alias_without_sender_fallback_text())
+
+
+async def _test_xmpp_direct_forward_uses_group_alias_without_sender_fallback_text():
+    settings = _settings()
+    cipher = SessionCipher(settings.session_encryption_key)
+    repository = FakeRepository()
+    repository.session = {
+        "telegram_user_id": 42,
+        "phone": None,
+        "encrypted_session": cipher.encrypt("stored-session"),
+        "connected": True,
+    }
+    transport = TelegramTransport(settings, repository)
+    transport.telegram = FakeTelegramBackend()
+    group_jid = "telegramg-75736572406578616d706c652e636f6d--100500@example.com"
+    transport._remember_group_reply_alias(
+        xmpp_jid="user@example.com",
+        peer_id="-100500",
+        source_message_id="xabber-group-1",
+        target_message_id="902",
+    )
+
+    await transport.send_direct_message(
+        XmppIncomingMessage(
+            sender="user@example.com",
+            recipient="chat-200@telegram.example.com",
+            body="",
+            forward_references=(
+                XmppForwardReference(
+                    message_id="xabber-group-1",
+                    body="еуые1",
+                    sender="admin@example.com",
+                    recipient=group_jid,
+                ),
+            ),
+        )
+    )
+
+    peer_id, body, reply_to_message_id, forward_reference, media = transport.telegram.sent[0]
+    assert (peer_id, body, reply_to_message_id) == (200, "", None)
+    assert forward_reference.source_peer_id == -100500
+    assert forward_reference.message_id == "902"
+    assert media == ()
+
+
 async def _test_xmpp_direct_media_reaches_telegram_backend():
     settings = _settings()
     cipher = SessionCipher(settings.session_encryption_key)
@@ -725,6 +824,31 @@ async def _test_incoming_telegram_direct_message_can_use_sender_id():
 
 def test_incoming_telegram_direct_media_only_sends_file_reference():
     asyncio.run(_test_incoming_telegram_direct_media_only_sends_file_reference())
+
+
+def test_incoming_telegram_direct_webpage_preview_does_not_create_media_reference():
+    asyncio.run(_test_incoming_telegram_direct_webpage_preview_does_not_create_media_reference())
+
+
+async def _test_incoming_telegram_direct_webpage_preview_does_not_create_media_reference():
+    transport = TelegramTransport(_settings(), FakeRepository())
+    transport.xmpp = FakeXmpp()
+    media = type("MessageMediaWebPage", (), {})()
+
+    await transport._handle_incoming_telegram_message(
+        "user@example.com",
+        FakeEvent(
+            chat_id=100,
+            raw_text="https://example.com",
+            media=media,
+        ),
+    )
+
+    assert transport.repository.media_refs == {}
+    assert transport.xmpp.client.direct_media == [()]
+    assert transport.xmpp.client.direct_messages == [
+        ("user@example.com", 100, "https://example.com", "900", None, (), False)
+    ]
 
 
 async def _test_incoming_telegram_direct_media_only_sends_file_reference():
@@ -850,6 +974,14 @@ def test_stream_media_proxies_telegram_chunks(monkeypatch):
     asyncio.run(_test_stream_media_proxies_telegram_chunks(monkeypatch))
 
 
+def test_stream_media_ignores_client_disconnect_during_prepare(monkeypatch):
+    asyncio.run(_test_stream_media_ignores_client_disconnect_during_prepare(monkeypatch))
+
+
+def test_stream_media_returns_404_for_stale_webpage_preview_reference(monkeypatch):
+    asyncio.run(_test_stream_media_returns_404_for_stale_webpage_preview_reference(monkeypatch))
+
+
 async def _test_stream_media_proxies_telegram_chunks(monkeypatch):
     settings = _settings()
     cipher = SessionCipher(settings.session_encryption_key)
@@ -891,12 +1023,88 @@ async def _test_stream_media_proxies_telegram_chunks(monkeypatch):
     assert telegram.clients == []
 
 
+async def _test_stream_media_ignores_client_disconnect_during_prepare(monkeypatch):
+    settings = _settings()
+    cipher = SessionCipher(settings.session_encryption_key)
+    repository = FakeRepository()
+    repository.session = {
+        "telegram_user_id": 42,
+        "phone": None,
+        "encrypted_session": cipher.encrypt("stored-session"),
+        "connected": True,
+    }
+    repository.media_refs["token"] = {
+        "owner_jid": "user@example.com",
+        "peer_id": 100,
+        "message_id": "901",
+        "file_name": "photo.jpg",
+        "mime_type": "image/jpeg",
+        "bytes_count": 7,
+        "width": 640,
+        "height": 480,
+    }
+    transport = TelegramTransport(settings, repository)
+    telegram = FakeTelegramBackend()
+    telegram.media = SimpleNamespace(chunks=(b"abc",))
+    transport.telegram = telegram
+    DisconnectingStreamResponse.instances = []
+    monkeypatch.setattr(transport_module.web, "StreamResponse", DisconnectingStreamResponse)
+    request = SimpleNamespace(match_info={"token": "token"})
+
+    response = await transport.stream_media(request)
+
+    assert response.prepared
+    assert response.chunks == []
+    assert telegram.media_clients[0].disconnected
+    assert telegram.clients == []
+
+
+async def _test_stream_media_returns_404_for_stale_webpage_preview_reference(monkeypatch):
+    settings = _settings()
+    cipher = SessionCipher(settings.session_encryption_key)
+    repository = FakeRepository()
+    repository.session = {
+        "telegram_user_id": 42,
+        "phone": None,
+        "encrypted_session": cipher.encrypt("stored-session"),
+        "connected": True,
+    }
+    repository.media_refs["token"] = {
+        "owner_jid": "user@example.com",
+        "peer_id": 100,
+        "message_id": "901",
+        "file_name": "telegram-901.bin",
+        "mime_type": "application/octet-stream",
+        "bytes_count": None,
+        "width": None,
+        "height": None,
+    }
+    transport = TelegramTransport(settings, repository)
+    telegram = FakeTelegramBackend()
+    telegram.media = type("MessageMediaWebPage", (), {})()
+    transport.telegram = telegram
+    FakeStreamResponse.instances = []
+    monkeypatch.setattr(transport_module.web, "StreamResponse", FakeStreamResponse)
+    request = SimpleNamespace(match_info={"token": "token"})
+
+    try:
+        await transport.stream_media(request)
+    except transport_module.web.HTTPNotFound:
+        pass
+    else:
+        raise AssertionError("expected HTTPNotFound")
+
+    assert FakeStreamResponse.instances == []
+    assert telegram.media_clients[0].disconnected
+    assert telegram.clients == []
+
+
 def test_incoming_telegram_direct_reply_sends_xabber_reply_reference():
     asyncio.run(_test_incoming_telegram_direct_reply_sends_xabber_reply_reference())
 
 
-def test_outgoing_telegram_direct_self_reply_is_synced_to_xabber():
-    asyncio.run(_test_outgoing_telegram_direct_self_reply_is_synced_to_xabber())
+def test_outgoing_telegram_direct_self_reply_is_ignored():
+    asyncio.run(_test_outgoing_telegram_direct_self_reply_is_ignored())
 
 
 def test_incoming_telegram_direct_forward_sends_xabber_forward_reference():
@@ -934,7 +1142,7 @@ async def _test_incoming_telegram_direct_reply_sends_xabber_reply_reference():
     assert reply_reference.body == "original"
 
 
-async def _test_outgoing_telegram_direct_self_reply_is_synced_to_xabber():
+async def _test_outgoing_telegram_direct_self_reply_is_ignored():
     transport = TelegramTransport(_settings(), FakeRepository())
     transport.xmpp = FakeXmpp()
     transport._remember_direct_reply_context(
@@ -953,15 +1161,7 @@ async def _test_outgoing_telegram_direct_self_reply_is_synced_to_xabber():
         FakeEvent(chat_id=100, raw_text="self reply", out=True, message_id=901, reply_to_msg_id=900),
     )
 
-    assert len(transport.xmpp.client.direct_messages) == 1
-    to_jid, peer_id, body, message_id, reply_reference, forward_references, fake_outgoing = (
-        transport.xmpp.client.direct_messages[0]
-    )
-    assert (to_jid, peer_id, body, message_id) == ("user@example.com", 100, "self reply", "901")
-    assert forward_references == ()
-    assert fake_outgoing is True
-    assert reply_reference is not None
-    assert reply_reference.message_id == "900"
+    assert transport.xmpp.client.direct_messages == []
 
 
 async def _test_incoming_telegram_direct_forward_sends_xabber_forward_reference():
@@ -999,11 +1199,11 @@ async def _test_incoming_telegram_direct_forward_sends_xabber_forward_reference(
     assert forward_references[0].sender == "chat-200@telegram.example.com"
 
 
-def test_incoming_telegram_message_syncs_outgoing_private_and_ignores_empty_messages():
-    asyncio.run(_test_incoming_telegram_message_syncs_outgoing_private_and_ignores_empty_messages())
+def test_incoming_telegram_message_ignores_outgoing_private_and_empty_messages():
+    asyncio.run(_test_incoming_telegram_message_ignores_outgoing_private_and_empty_messages())
 
 
-async def _test_incoming_telegram_message_syncs_outgoing_private_and_ignores_empty_messages():
+async def _test_incoming_telegram_message_ignores_outgoing_private_and_empty_messages():
     transport = TelegramTransport(_settings(), FakeRepository())
     transport.xmpp = FakeXmpp()
 
@@ -1016,9 +1216,7 @@ async def _test_incoming_telegram_message_syncs_outgoing_private_and_ignores_emp
         FakeEvent(chat_id=100, raw_text="  "),
     )
 
-    assert transport.xmpp.client.direct_messages == [
-        ("user@example.com", 100, "outgoing", "900", None, (), True)
-    ]
+    assert transport.xmpp.client.direct_messages == []
     assert transport.xmpp.client.group_messages == []
 
 

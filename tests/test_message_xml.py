@@ -132,7 +132,7 @@ def test_body_with_forward_references_adds_xabber_forward_payload():
         ),
     )
 
-    assert body == "> chat-200@telegram.example.com:\n> Forwarded text\ncomment"
+    assert body == "> Forwarded text\ncomment"
     assert len(references) == 1
     reference = references[0]
     assert reference.attrib["type"] == "mutable"
@@ -168,3 +168,52 @@ def test_extract_forwarded_body_and_references_removes_forward_fallback():
     assert forward_references[0].message_id == "777"
     assert forward_references[0].body == "Forwarded text"
     assert forward_references[0].sender == "chat-200@telegram.example.com"
+
+
+def test_extract_forwarded_reference_without_fallback_range_from_same_chat():
+    xml = ET.Element("message")
+    reference = ET.SubElement(xml, "{%s}reference" % XABBER_REFERENCES_NS, {"type": "mutable"})
+    forwarded = ET.SubElement(reference, "{%s}forwarded" % FORWARDED_NS)
+    forwarded_message = ET.SubElement(
+        forwarded,
+        "{jabber:client}message",
+        {
+            "from": "chat-100@telegram.example.com",
+            "to": "user@example.com",
+            "id": "777",
+        },
+    )
+    ET.SubElement(forwarded_message, "{jabber:client}body").text = "?"
+    msg = FakeMessage("?", "chat-100@telegram.example.com", xml)
+
+    normalized_body, forward_references = XmppMessageXml.extract_forwarded_body_and_references(msg, "?")
+
+    assert normalized_body == ""
+    assert len(forward_references) == 1
+    assert forward_references[0].message_id == "777"
+    assert forward_references[0].body == "?"
+
+
+def test_extract_forwarded_reference_strips_sender_jid_fallback_body():
+    xml = ET.Element("message")
+    reference = ET.SubElement(xml, "{%s}reference" % XABBER_REFERENCES_NS, {"type": "mutable"})
+    forwarded = ET.SubElement(reference, "{%s}forwarded" % FORWARDED_NS)
+    forwarded_message = ET.SubElement(
+        forwarded,
+        "{jabber:client}message",
+        {
+            "from": "admin@example.com",
+            "to": "telegramg-75736572406578616d706c652e636f6d--100500@example.com",
+            "id": "xabber-group-1",
+        },
+    )
+    ET.SubElement(forwarded_message, "{jabber:client}body").text = "еуые1"
+    body = "admin@example.com:\nеуые1"
+    msg = FakeMessage(body, "chat-100@telegram.example.com", xml)
+
+    normalized_body, forward_references = XmppMessageXml.extract_forwarded_body_and_references(msg, body)
+
+    assert normalized_body == ""
+    assert len(forward_references) == 1
+    assert forward_references[0].message_id == "xabber-group-1"
+    assert forward_references[0].body == "еуые1"
