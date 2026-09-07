@@ -3,7 +3,7 @@ import logging
 import posixpath
 import secrets
 import shutil
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Optional
 from urllib.parse import quote
 
@@ -28,6 +28,7 @@ log = logging.getLogger(__name__)
 MEDIA_PROXY_CONNECT_TIMEOUT_SECONDS = 15
 MEDIA_PROXY_LOOKUP_TIMEOUT_SECONDS = 15
 GROUP_MEMBER_SYNC_TIMEOUT_SECONDS = 2
+GROUP_ECHO_SUPPRESS_SECONDS = 60
 XABBER_VOICE_MIME_TYPE = "audio/webm;codecs=opus"
 MEDIA_CORS_HEADERS = {
     "Access-Control-Allow-Origin": "*",
@@ -65,6 +66,8 @@ class TelegramTransport:
         self._group_reply_aliases: Dict[tuple, str] = {}
         self._group_ensure_signatures: Dict[tuple, str] = {}
         self._group_protocol_members: set = set()
+        self._group_echo_message_ids: Dict[tuple, datetime] = {}
+        self._group_echo_bodies: Dict[tuple, datetime] = {}
         self._media_stream_semaphores: Dict[str, asyncio.Semaphore] = {}
         self._avatar_cleanup_task: Optional[asyncio.Task] = None
         self._stopped = asyncio.Event()
@@ -235,11 +238,20 @@ class TelegramTransport:
         group_route = self._bot_group_fanout_route(xmpp_jid, contact_jid, message.group_sender_jid)
         if group_route is not None:
             owner_jid, chat_id = group_route
+            stripped_body = self._strip_xabber_group_sender_prefix(body, message.group_sender_jid)
+            if self._consume_group_echo(owner_jid, chat_id, message.message_id, stripped_body):
+                log.debug(
+                    "Ignoring reflected Telegram group message owner=%s chat_id=%s message_id=%s",
+                    owner_jid,
+                    chat_id,
+                    message.message_id,
+                )
+                return
             await self._send_xabber_group_message_to_telegram(
                 owner_jid,
                 chat_id,
                 message,
-                body=self._strip_xabber_group_sender_prefix(body, message.group_sender_jid),
+                body=stripped_body,
             )
             return
         if contact_jid == self.xmpp.client.bot_jid and message.group_sender_jid is not None:
@@ -869,6 +881,12 @@ class TelegramTransport:
                 fake_outgoing=True,
             ),
         )
+        self._remember_group_echo(
+            xmpp_jid=xmpp_jid,
+            peer_id=str(peer_id),
+            message_id=message_id,
+            body=context_body,
+        )
 
     async def _send_xabber_group_message_to_telegram(
         self,
@@ -973,6 +991,39 @@ class TelegramTransport:
         if group_sender_jid != owner_jid:
             return None
         return route
+
+    def _remember_group_echo(self, xmpp_jid: str, peer_id: str, message_id: str, body: str) -> None:
+        expires_at = datetime.now(timezone.utc) + timedelta(seconds=GROUP_ECHO_SUPPRESS_SECONDS)
+        if message_id:
+            self._group_echo_message_ids[(xmpp_jid, peer_id, message_id)] = expires_at
+        normalized_body = self._normalized_group_echo_body(body)
+        if normalized_body:
+            self._group_echo_bodies[(xmpp_jid, peer_id, normalized_body)] = expires_at
+
+    def _consume_group_echo(
+        self,
+        xmpp_jid: str,
+        peer_id: str,
+        message_id: Optional[str],
+        body: str,
+    ) -> bool:
+        if message_id and self._consume_group_echo_key(self._group_echo_message_ids, (xmpp_jid, peer_id, message_id)):
+            return True
+        normalized_body = self._normalized_group_echo_body(body)
+        if normalized_body and self._consume_group_echo_key(self._group_echo_bodies, (xmpp_jid, peer_id, normalized_body)):
+            return True
+        return False
+
+    @staticmethod
+    def _consume_group_echo_key(store: Dict[tuple, datetime], key: tuple) -> bool:
+        expires_at = store.pop(key, None)
+        if expires_at is None:
+            return False
+        return expires_at >= datetime.now(timezone.utc)
+
+    @staticmethod
+    def _normalized_group_echo_body(body: str) -> str:
+        return str(body or "").strip()
 
     @staticmethod
     def _incoming_telegram_message_id(event) -> str:

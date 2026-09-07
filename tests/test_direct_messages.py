@@ -1764,6 +1764,41 @@ async def _test_transport_group_fanout_copy_is_ignored():
     assert transport.telegram.group_sent == []
 
 
+def test_reflected_incoming_telegram_group_message_without_marker_is_ignored():
+    asyncio.run(_test_reflected_incoming_telegram_group_message_without_marker_is_ignored())
+
+
+async def _test_reflected_incoming_telegram_group_message_without_marker_is_ignored():
+    transport = TelegramTransport(_settings(), FakeRepository())
+    transport.telegram = FakeTelegramBackend()
+    transport.xmpp = FakeXmpp()
+    group_jid = "telegramg-75736572406578616d706c652e636f6d--100500@example.com"
+
+    await transport._handle_incoming_telegram_message(
+        "user@example.com",
+        FakeEvent(
+            chat_id=-100500,
+            raw_text="echo from telegram",
+            is_private=False,
+            sender_id=200,
+            message_id=901,
+            title="Telegram Team",
+            sender_first_name="Alice",
+        ),
+    )
+    await transport.send_direct_message(
+        XmppIncomingMessage(
+            sender=group_jid,
+            recipient="bot@telegram.example.com",
+            body="echo from telegram",
+            message_id="901",
+            group_sender_jid="user@example.com",
+        )
+    )
+
+    assert transport.telegram.group_sent == []
+
+
 def test_command_login_callback_starts_telegram_listener():
     asyncio.run(_test_command_login_callback_starts_telegram_listener())
 
